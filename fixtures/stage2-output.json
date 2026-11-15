@@ -1,0 +1,64 @@
+{
+  "ok": true,
+  "error": "",
+  "mode": "paper",
+  "title": "一次函数中等难度单选题",
+  "payload": {
+    "questions": [
+      {
+        "type": "choice",
+        "content": "若一次函数 y=(m-3)x+2 中，y 随 x 的增大而减小，则 m 的取值范围是（　）",
+        "options": [
+          "m>3",
+          "m<3",
+          "m≥3",
+          "m≤3"
+        ],
+        "answer": "B",
+        "answerText": "m<3",
+        "points": 5,
+        "analysis": "一次函数 y=kx+b 中，当 k<0 时，y 随 x 的增大而减小。由题意得 m-3<0，所以 m<3。"
+      },
+      {
+        "type": "choice",
+        "content": "已知一次函数的图象经过点（1，4）和（-1，0），则该一次函数的解析式为（　）",
+        "options": [
+          "y=2x+2",
+          "y=2x-2",
+          "y=-2x+2",
+          "y=-2x-2"
+        ],
+        "answer": "A",
+        "answerText": "y=2x+2",
+        "points": 5,
+        "analysis": "设一次函数解析式为 y=kx+b。把点（1，4）和（-1，0）代入，得 k+b=4，-k+b=0，解得 k=2，b=2，所以解析式为 y=2x+2。"
+      },
+      {
+        "type": "choice",
+        "content": "将一次函数 y=3x-2 的图象向上平移4个单位长度，所得图象对应的函数解析式为（　）",
+        "options": [
+          "y=3x-6",
+          "y=3x+2",
+          "y=3x-4",
+          "y=3x+6"
+        ],
+        "answer": "B",
+        "answerText": "y=3x+2",
+        "points": 5,
+        "analysis": "一次函数图象向上平移时，函数值整体增加。将 y=3x-2 向上平移4个单位长度，得 y=3x-2+4，即 y=3x+2。"
+      }
+    ]
+  },
+  "meta": {
+    "provider": "deepseek-account",
+    "model": "deepseek-flash",
+    "attempts": 1,
+    "retrieved": 1,
+    "countRequested": 3,
+    "countGot": 3,
+    "gap": "",
+    "elapsedMs": 8279,
+    "inputTokens": 263,
+    "outputTokens": 1520
+  }
+}

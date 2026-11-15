@@ -1,0 +1,42 @@
+[
+  {
+    "grade": "初一",
+    "subject": "数学",
+    "chapter": "一元一次方程",
+    "type": "choice",
+    "content": "若 2x-3=7，则 x 的值是（　）",
+    "options": ["2", "5", "4", "10"],
+    "answer": "5",
+    "analysis": "移项得 2x=10，两边同除 2，x=5。"
+  },
+  {
+    "grade": "初一",
+    "subject": "数学",
+    "chapter": "一元一次方程",
+    "type": "choice",
+    "content": "解方程 3(x-1)=2x+4，下列步骤最先出错的是（　）",
+    "options": ["去括号得 3x-3=2x+4", "移项得 3x-2x=4+3", "合并得 x=7", "以上均正确"],
+    "answer": "以上均正确",
+    "analysis": "三步过程均无误，故 x=7。"
+  },
+  {
+    "grade": "初二",
+    "subject": "数学",
+    "chapter": "一次函数",
+    "type": "choice",
+    "content": "一次函数 y=-2x+3 中，y 随 x 增大而（　）",
+    "options": ["增大", "减小", "不变", "先增后减"],
+    "answer": "减小",
+    "analysis": "k=-2<0，故 y 随 x 增大而减小。"
+  },
+  {
+    "grade": "初三",
+    "subject": "物理",
+    "chapter": "欧姆定律",
+    "type": "choice",
+    "content": "某导体两端电压为 6V 时通过电流 0.3A，该导体电阻为（　）",
+    "options": ["2Ω", "18Ω", "20Ω", "0.05Ω"],
+    "answer": "20Ω",
+    "analysis": "R=U/I=6/0.3=20Ω。"
+  }
+]

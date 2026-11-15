@@ -1,0 +1,918 @@
+/**
+ * 本地 PDF 渲染：题库直出的结构化数据 → 高考卷式 A4。
+ *
+ * 三条硬约束（来自委托书和甲方口述）：
+ *   1. 零模型调用 —— 只吃 PaperResult，不碰 ctx.llm；
+ *   2. 版式固定 —— 字体/字号/页边距/分栏都在这里写死，用户改不了；
+ *   3. 数学要像卷子 —— 分数画成上下结构（不是 a/b），上标用真上标字符。
+ *
+ * 排版风格参照高考数学卷：卷头居中标题 + 考试信息 + 注意事项框 + 考生信息栏，
+ * 题目按「选择题 / 填空题 / 解答题」分节，选题 2~4 列对齐，答案单独起页。
+ */
+import PDFDocument from 'pdfkit'
+import { splitMath, normalizeExponents, type MathToken } from './math-text.js'
+import type { PaperQuestion, PaperResult } from './modes/paper.js'
+
+// ── 版式常量（锁死，不对外暴露） ────────────────────────────────
+const A4 = { width: 595.28, height: 841.89 }
+const MARGIN = { top: 52, bottom: 58, left: 56, right: 56 }
+const CONTENT_WIDTH = A4.width - MARGIN.left - MARGIN.right
+const BODY_SIZE = 10.5
+const BODY_LINE = 17
+const SMALL_SIZE = 9
+
+// Windows 自带字体；中文卷子用宋体正文 + 黑体标题最接近印刷体
+const FONTS = {
+  song: 'C:/Windows/Fonts/simsun.ttc',
+  hei: 'C:/Windows/Fonts/simhei.ttf',
+  kai: 'C:/Windows/Fonts/simkai.ttf',
+}
+
+const SECTION_ORDER: Array<{ type: string; title: string }> = [
+  { type: 'choice', title: '选择题' },
+  { type: 'fill', title: '填空题' },
+  { type: 'solve', title: '解答题' },
+]
+
+export interface RenderOptions {
+  withAnswer: boolean
+  examMinutes?: number
+  totalPoints?: number
+}
+
+/** 渲染一份试卷到 PDF Buffer，同时回传页数（前端要显示「共 N 页」）。 */
+export function renderPaperPdf(paper: PaperResult, options: RenderOptions): Promise<{ buffer: Buffer; pages: number }> {
+  const doc = new PDFDocument({
+    size: 'A4',
+    margins: MARGIN,
+    bufferPages: true,
+    info: { Title: paper.title, Creator: 'dsh-exam-gen' },
+  })
+
+  registerFonts(doc)
+
+  const chunks: Buffer[] = []
+  doc.on('data', (chunk: Buffer) => chunks.push(chunk))
+  let pageCount = 0
+  const done = new Promise<{ buffer: Buffer; pages: number }>((resolve, reject) => {
+    // bufferedPageRange() 必须在 doc.end() 之前读：结束写入后 pdfkit 会清掉缓冲区
+    doc.on('end', () => resolve({ buffer: Buffer.concat(chunks), pages: pageCount }))
+    doc.on('error', reject)
+  })
+
+  const totalPoints = options.totalPoints ?? sumPoints(paper)
+  drawHeader(doc, paper, totalPoints, options.examMinutes ?? estimateMinutes(paper))
+  drawQuestions(doc, paper)
+
+  if (options.withAnswer) {
+    doc.addPage()
+    drawAnswerPage(doc, paper)
+  }
+
+  stampFooters(doc, paper.title)
+  pageCount = doc.bufferedPageRange().count
+  doc.end()
+  return done
+}
+
+function registerFonts(doc: PDFKit.PDFDocument): void {
+  doc.registerFont('song', FONTS.song, 'SimSun')
+  doc.registerFont('hei', FONTS.hei)
+  doc.registerFont('kai', FONTS.kai)
+}
+
+function sumPoints(paper: PaperResult): number {
+  return paper.questions.reduce((sum, q) => sum + (q.points || 0), 0)
+}
+
+function estimateMinutes(paper: PaperResult): number {
+  // 先按每题 3 分钟粗估，再夹到 45~120 分钟的常见区间
+  return Math.min(120, Math.max(45, Math.round(paper.questions.length * 3)))
+}
+
+function drawHeader(doc: PDFKit.PDFDocument, paper: PaperResult, totalPoints: number, minutes: number): void {
+  const centerX = A4.width / 2
+
+  doc.font('hei').fontSize(19).fillColor('#111')
+  doc.text(paper.title, MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+
+  doc.moveDown(0.35)
+  doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#333')
+  const difficulty = paper.meta?.difficulty ? `　　难度：${paper.meta.difficulty}` : ''
+  doc.text(`考试时间：${minutes} 分钟　　满分：${totalPoints} 分${difficulty}`, { width: CONTENT_WIDTH, align: 'center' })
+
+  doc.moveDown(0.7)
+
+  // 注意事项框
+  const boxTop = doc.y
+  const boxHeight = 62
+  doc.save()
+  doc.lineWidth(0.8).strokeColor('#999')
+  doc.rect(MARGIN.left, boxTop, CONTENT_WIDTH, boxHeight).stroke()
+  doc.restore()
+
+  doc.font('hei').fontSize(9).fillColor('#111')
+  doc.text('注意事项', MARGIN.left + 10, boxTop + 7, { width: 60 })
+  doc.font('song').fontSize(9).fillColor('#222')
+  doc.text(
+    [
+      '1．答题前请将姓名、班级、学号填写在密封线内。',
+      '2．选择题、填空题答案写在答题处；解答题写出必要的文字说明、演算步骤。',
+      '3．考试结束后，将本试卷和答题卡一并交回。',
+    ].join('\n'),
+    MARGIN.left + 68,
+    boxTop + 6,
+    { width: CONTENT_WIDTH - 80, lineGap: 2.5 },
+  )
+
+  doc.y = boxTop + boxHeight + 10
+
+  // 考生信息栏 + 密封线
+  const infoY = doc.y
+  doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
+  doc.text('姓名：____________　　班级：____________　　学号：____________', MARGIN.left, infoY, {
+    width: CONTENT_WIDTH,
+  })
+
+  doc.moveDown(0.6)
+  doc.font('kai').fontSize(SMALL_SIZE).fillColor('#666')
+  doc.text('———————————————————— 密 封 线 ————————————————————', MARGIN.left, doc.y, {
+    width: CONTENT_WIDTH,
+    align: 'center',
+  })
+
+  doc.moveDown(0.9)
+  doc.fillColor('#111')
+  void centerX
+}
+
+function drawQuestions(doc: PDFKit.PDFDocument, paper: PaperResult): void {
+  let index = 0
+  for (const section of SECTION_ORDER) {
+    const group = paper.questions.filter((q) => normalizeType(q.type) === section.type)
+    if (group.length === 0) continue
+
+    const points = group.reduce((sum, q) => sum + (q.points || 0), 0)
+    ensureSpace(doc, 40)
+    doc.moveDown(0.5)
+    doc.font('hei').fontSize(12).fillColor('#111')
+    doc.text(`${chineseNumber(++index)}、${section.title}（共 ${group.length} 题，${points} 分）`, MARGIN.left, doc.y, {
+      width: CONTENT_WIDTH,
+    })
+    doc.moveDown(0.35)
+
+    group.forEach((question, i) => {
+      const isLast = i === group.length - 1
+      drawQuestion(doc, i + 1, question, isLast)
+    })
+  }
+}
+
+function drawQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQuestion, isLast: boolean): void {
+  const labelWidth = 22
+  ensureSpace(doc, 46)
+  const startY = doc.y
+
+  doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
+  doc.text(`${number}.`, MARGIN.left, startY, { width: labelWidth, lineBreak: false })
+
+  let cursorY = flowMath(doc, normalizeExponents(question.content), MARGIN.left + labelWidth, startY, CONTENT_WIDTH - labelWidth, {
+    size: BODY_SIZE,
+  })
+
+  const options = question.options ?? []
+  if (options.length > 0) {
+    cursorY += 3
+    cursorY = drawOptions(doc, options, cursorY)
+  } else if (normalizeType(question.type) === 'solve') {
+    // 解答题留作答空间（按分值给行数，卷面更像样）
+    const lines = Math.max(4, Math.min(12, Math.round((question.points || 10) / 2.5)))
+    cursorY += lines * BODY_LINE * 0.9
+  } else {
+    // 填空题：题干本身不带空位时，在题干下方单独一行画作答横线（卷面常见做法）
+    if (!/[＿_]{2,}/.test(question.content)) {
+      const lineY = cursorY + 7
+      doc.save()
+      doc.font('song').fontSize(SMALL_SIZE).fillColor('#666')
+      doc.text('答：', MARGIN.left + labelWidth, cursorY - 1, { width: 24, lineBreak: false })
+      doc.lineWidth(0.7).strokeColor('#333')
+      doc.moveTo(MARGIN.left + labelWidth + 26, lineY)
+      doc.lineTo(MARGIN.left + labelWidth + 210, lineY)
+      doc.stroke()
+      doc.restore()
+      cursorY += 22
+    } else {
+      cursorY += 8
+    }
+  }
+
+  doc.y = cursorY + (isLast ? 6 : 8)
+}
+
+function drawOptions(doc: PDFKit.PDFDocument, options: string[], top: number): number {
+  const letters = 'ABCDEFGH'
+  const indent = 22
+  const usable = CONTENT_WIDTH - indent
+
+  // 列数按「最长选项的实际渲染宽度」算，能塞几列就塞几列（2~4），避免长选项被硬折行
+  doc.font('song').fontSize(BODY_SIZE)
+  const widest = Math.max(...options.map((option) => doc.widthOfString(normalizeExponents(option))), 1)
+  const slot = widest + 26
+  const columns = Math.max(2, Math.min(4, Math.floor(usable / slot)))
+  const columnWidth = usable / columns
+  const rowHeight = BODY_LINE + 2
+  let y = top
+
+  for (let i = 0; i < options.length; i += columns) {
+    const row = options.slice(i, i + columns)
+    row.forEach((option, j) => {
+      const letter = letters[i + j] ?? '?'
+      const x = MARGIN.left + indent + j * columnWidth
+      doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
+      doc.text(`${letter}.`, x, y, { width: 15, lineBreak: false })
+      flowMath(doc, normalizeExponents(option), x + 15, y, columnWidth - 18, { size: BODY_SIZE })
+    })
+    y += rowHeight
+  }
+  return y
+}
+
+function drawAnswerPage(doc: PDFKit.PDFDocument, paper: PaperResult): void {
+  doc.font('hei').fontSize(15).fillColor('#111')
+  doc.text('参考答案与解析', MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+  doc.moveDown(0.8)
+
+  // 选择题速查表
+  const choices = paper.questions
+    .map((q, i) => ({ index: i + 1, q }))
+    .filter((row) => normalizeType(row.q.type) === 'choice' && row.q.answer)
+  if (choices.length >= 4) {
+    drawAnswerTable(doc, choices)
+    doc.moveDown(0.8)
+  }
+
+  paper.questions.forEach((question, i) => {
+    ensureSpace(doc, 40)
+    const y = doc.y
+
+    doc.font('hei').fontSize(BODY_SIZE).fillColor('#111')
+    doc.text(`${i + 1}．`, MARGIN.left, y, { width: 22, lineBreak: false })
+
+    const parts: string[] = []
+    if (question.answer) parts.push(`答案：${normalizeExponents(String(question.answerText || question.answer))}`)
+    if (question.analysis) parts.push(`解析：${normalizeExponents(question.analysis)}`)
+
+    doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#111')
+    const endY = flowMath(doc, parts.join('　'), MARGIN.left + 22, y, CONTENT_WIDTH - 22, { size: BODY_SIZE - 0.5 })
+    doc.y = endY + 5
+  })
+}
+
+function drawAnswerTable(doc: PDFKit.PDFDocument, rows: Array<{ index: number; q: PaperQuestion }>): void {
+  const perRow = Math.min(6, rows.length)
+  const cellWidth = CONTENT_WIDTH / perRow
+  let y = doc.y
+
+  for (let start = 0; start < rows.length; start += perRow) {
+    const slice = rows.slice(start, start + perRow)
+    doc.font('hei').fontSize(SMALL_SIZE).fillColor('#111')
+    slice.forEach((row, j) => {
+      doc.text(`第 ${row.index} 题`, MARGIN.left + j * cellWidth, y, { width: cellWidth, align: 'center' })
+    })
+    doc.font('song').fontSize(SMALL_SIZE).fillColor('#111')
+    slice.forEach((row, j) => {
+      doc.text(String(row.q.answer ?? '—'), MARGIN.left + j * cellWidth, y + 14, { width: cellWidth, align: 'center' })
+    })
+    y += 32
+  }
+  doc.y = y
+}
+
+/**
+ * 行内数学流式排版：逐词摆放，遇到分数就画成上/横线/下三段。
+ * 返回排版结束后的 y（下一行起点）。
+ */
+function flowMath(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  startX: number,
+  startY: number,
+  maxWidth: number,
+  style: { size: number },
+): number {
+  const size = style.size
+  const lineHeight = size * 1.62
+  let x = startX
+  let y = startY
+  const rightEdge = startX + maxWidth
+
+  const words = segment(text)
+  for (const word of words) {
+    if (word === '\n') {
+      x = startX
+      y += lineHeight
+      continue
+    }
+
+    const tokens = splitMath(word)
+    for (const token of tokens) {
+      const width = tokenWidth(doc, token, size)
+      if (x + width > rightEdge && x > startX) {
+        x = startX
+        y += lineHeight
+      }
+      drawToken(doc, token, x, y, size)
+      x += width
+    }
+  }
+  return y + lineHeight
+}
+
+function segment(text: string): string[] {
+  const out: string[] = []
+  let buffer = ''
+  for (const ch of text) {
+    if (ch === '\n') {
+      if (buffer) out.push(buffer)
+      buffer = ''
+      out.push('\n')
+      continue
+    }
+    buffer += ch
+    // 中日韩标点/空格后可以断行
+    if (' 　，。；：、？！（）'.includes(ch)) {
+      out.push(buffer)
+      buffer = ''
+    }
+  }
+  if (buffer) out.push(buffer)
+  return out
+}
+
+function tokenWidth(doc: PDFKit.PDFDocument, token: MathToken, size: number): number {
+  if (token.kind === 'text') {
+    doc.font('song').fontSize(size)
+    return doc.widthOfString(token.text)
+  }
+  doc.font('song').fontSize(size * 0.86)
+  const num = doc.widthOfString(token.num)
+  const den = doc.widthOfString(token.den)
+  return Math.max(num, den) + 3
+}
+
+function drawToken(doc: PDFKit.PDFDocument, token: MathToken, x: number, y: number, size: number): void {
+  if (token.kind === 'text') {
+    doc.font('song').fontSize(size).fillColor('#111')
+    doc.text(token.text, x, y, { lineBreak: false })
+    return
+  }
+
+  // 分数：分子在基线上方 0.62em，分母在下方
+  const small = size * 0.86
+  doc.font('song').fontSize(small).fillColor('#111')
+  const numWidth = doc.widthOfString(token.num)
+  const denWidth = doc.widthOfString(token.den)
+  const width = Math.max(numWidth, denWidth) + 3
+  const barY = y + size * 0.62
+
+  doc.text(token.num, x + (width - numWidth) / 2, barY - small - 1.2, { lineBreak: false })
+  doc.text(token.den, x + (width - denWidth) / 2, barY + 1.6, { lineBreak: false })
+
+  doc.save()
+  doc.lineWidth(0.6).strokeColor('#111')
+  doc.moveTo(x + 1.2, barY)
+  doc.lineTo(x + width - 1.2, barY)
+  doc.stroke()
+  doc.restore()
+}
+
+function ensureSpace(doc: PDFKit.PDFDocument, needed: number): void {
+  if (doc.y + needed > A4.height - MARGIN.bottom) doc.addPage()
+}
+
+function stampFooters(doc: PDFKit.PDFDocument, title: string): void {
+  const range = doc.bufferedPageRange()
+  for (let i = 0; i < range.count; i += 1) {
+    doc.switchToPage(range.start + i)
+    const y = A4.height - MARGIN.bottom + 22
+    // 页脚落在下边距里，必须临时把 bottom margin 归零，
+    // 否则 pdfkit 判定「y 超出内容区」会自动 addPage，凭空多出空白页
+    const savedBottom = doc.page.margins.bottom
+    doc.page.margins.bottom = 0
+    doc.font('song').fontSize(8).fillColor('#666')
+    doc.text(title, MARGIN.left, y, { width: CONTENT_WIDTH / 2, align: 'left', lineBreak: false })
+    doc.text(`第 ${i + 1} 页 / 共 ${range.count} 页`, MARGIN.left + CONTENT_WIDTH / 2, y, {
+      width: CONTENT_WIDTH / 2,
+      align: 'right',
+      lineBreak: false,
+    })
+    doc.page.margins.bottom = savedBottom
+  }
+}
+
+// ── 知识图谱：纯文本层级列表 ────────────────────
+//
+// 委托书明确要求这一类「不渲染图形」：就是一张能印出来当目录看的层级清单。
+// 版式和练习页/试卷都不一样：没有卷头、没有考生信息、没有答案页，
+// 只有标题 + 一行说明 + 三级编号列表，右侧对齐每节的题量（这就是覆盖度）。
+
+export function renderGraphPdf(
+  tree: { title: string; totalQuestions: number; nodes: Array<{ name: string; count: number; children: Array<{ name: string; count: number; children: Array<{ name: string; count: number }> }> }> },
+): Promise<{ buffer: Buffer; pages: number }> {
+  const doc = new PDFDocument({
+    size: 'A4',
+    margins: MARGIN,
+    bufferPages: true,
+    info: { Title: tree.title, Creator: 'dsh-exam-gen' },
+  })
+  registerFonts(doc)
+
+  const chunks: Buffer[] = []
+  doc.on('data', (chunk: Buffer) => chunks.push(chunk))
+  let pageCount = 0
+  const done = new Promise<{ buffer: Buffer; pages: number }>((resolve, reject) => {
+    doc.on('end', () => resolve({ buffer: Buffer.concat(chunks), pages: pageCount }))
+    doc.on('error', reject)
+  })
+
+  doc.font('hei').fontSize(16).fillColor('#111')
+  doc.text(tree.title, MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+  doc.moveDown(0.4)
+  doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#555')
+  doc.text(`共 ${tree.totalQuestions} 道题 · 括号内为该节点的题量（覆盖度）`, {
+    width: CONTENT_WIDTH,
+    align: 'center',
+  })
+  doc.moveDown(0.8)
+
+  const row = (text: string, count: number, indent: number, font: 'song' | 'hei', size: number) => {
+    ensureSpace(doc, 22)
+    const y = doc.y
+    doc.font(font).fontSize(size).fillColor(indent === 0 ? '#111' : '#333')
+    doc.text(text, MARGIN.left + indent, y, { width: CONTENT_WIDTH - indent - 46, lineBreak: false })
+    if (count > 0) {
+      doc.font('song').fontSize(SMALL_SIZE).fillColor('#777')
+      doc.text(`${count} 题`, MARGIN.left + CONTENT_WIDTH - 46, y + 0.5, { width: 46, align: 'right', lineBreak: false })
+    }
+    doc.y = y + size + 5
+  }
+
+  tree.nodes.forEach((grade, gi) => {
+    const before = doc.y
+    if (before > MARGIN.top + 40) doc.moveDown(0.35)
+    row(`${gi + 1}. ${grade.name}`, grade.count, 0, 'hei', 12)
+    grade.children.forEach((chapter, ci) => {
+      row(`${gi + 1}.${ci + 1}  ${chapter.name}`, chapter.count, 16, 'song', BODY_SIZE)
+      chapter.children.forEach((point, pi) => {
+        row(`${gi + 1}.${ci + 1}.${pi + 1}  第 ${point.name} 节`, point.count, 34, 'song', SMALL_SIZE + 0.5)
+      })
+    })
+  })
+
+  // 这一版页脚只放卷名 + 页码，不加密封线等卷面元素
+  stampFooters(doc, tree.title)
+  pageCount = doc.bufferedPageRange().count
+  doc.end()
+  return done
+}
+
+// ── 专项突破：专题练习册 ────────────────────────
+//
+// 这一类的读者是「已经知道自己哪块弱」的人，所以版式重心在「递进」和「方法」：
+//   · 卷头不摆注意事项，只写「知识点 · 难度走向 · 题量」；
+//   · 每题标题行左侧挂难度标签（基础/中档/拔高），一眼看出这组是不是在往上走；
+//   · 每题下面必跟一行灰色「变式说明」，告诉学生这题相对上一题变了什么；
+//   · 末尾单独一节「方法总结」，是这组题的方法收口，不是又抄一遍答案。
+
+export interface DrillRenderInput {
+  title: string
+  topic: string
+  variations: Array<{
+    stem: string
+    answer: string
+    explanation: string
+    variation_note: string
+    difficulty: string
+  }>
+  summary: string[]
+}
+
+export function renderDrillPdf(input: DrillRenderInput, options: RenderOptions): Promise<{ buffer: Buffer; pages: number }> {
+  const doc = new PDFDocument({
+    size: 'A4',
+    margins: MARGIN,
+    bufferPages: true,
+    info: { Title: input.title, Creator: 'dsh-exam-gen' },
+  })
+  registerFonts(doc)
+
+  const chunks: Buffer[] = []
+  doc.on('data', (chunk: Buffer) => chunks.push(chunk))
+  let pageCount = 0
+  const done = new Promise<{ buffer: Buffer; pages: number }>((resolve, reject) => {
+    doc.on('end', () => resolve({ buffer: Buffer.concat(chunks), pages: pageCount }))
+    doc.on('error', reject)
+  })
+
+  const difficulties = [...new Set(input.variations.map((v) => v.difficulty))]
+
+  doc.font('hei').fontSize(17).fillColor('#111')
+  doc.text(input.title, MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+  doc.moveDown(0.45)
+  doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#444')
+  doc.text(`知识点：${input.topic}　　难度走向：${difficulties.join(' → ')}　　共 ${input.variations.length} 道`, {
+    width: CONTENT_WIDTH,
+    align: 'center',
+  })
+
+  doc.moveDown(0.7)
+  doc.lineWidth(0.8).strokeColor('#999')
+  const ruleY = doc.y
+  doc.moveTo(MARGIN.left, ruleY).lineTo(MARGIN.left + CONTENT_WIDTH, ruleY).stroke()
+  doc.moveDown(0.6)
+
+  doc.font('hei').fontSize(12).fillColor('#111')
+  doc.text('一、题目（按难度递进）', MARGIN.left, doc.y, { width: CONTENT_WIDTH })
+  doc.moveDown(0.4)
+
+  input.variations.forEach((variation, index) => {
+    const labelWidth = 22
+    ensureSpace(doc, 60)
+    const startY = doc.y
+
+    // 难度标签（右上角小方块感的文字，不用画框，避免视觉噪音）
+    doc.save()
+    doc.font('hei').fontSize(SMALL_SIZE - 0.5).fillColor(variation.difficulty === '拔高' ? '#8a2f2f' : '#666')
+    doc.text(variation.difficulty, MARGIN.left + CONTENT_WIDTH - 40, startY, { width: 40, align: 'right', lineBreak: false })
+    doc.restore()
+
+    doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
+    doc.text(`${index + 1}.`, MARGIN.left, startY, { width: labelWidth, lineBreak: false })
+
+    let cursorY = flowMath(doc, normalizeExponents(variation.stem), MARGIN.left + labelWidth, startY, CONTENT_WIDTH - labelWidth - 46, {
+      size: BODY_SIZE,
+    })
+
+    // 作答空间
+    cursorY += 2
+    doc.save()
+    doc.font('song').fontSize(SMALL_SIZE).fillColor('#666')
+    doc.text('答：', MARGIN.left + labelWidth, cursorY + 4, { width: 24, lineBreak: false })
+    doc.lineWidth(0.7).strokeColor('#333')
+    doc.moveTo(MARGIN.left + labelWidth + 26, cursorY + 14)
+    doc.lineTo(MARGIN.left + labelWidth + 220, cursorY + 14)
+    doc.stroke()
+    doc.restore()
+    cursorY += 22
+
+    // 变式说明
+    doc.save()
+    doc.font('song').fontSize(SMALL_SIZE - 1).fillColor('#777')
+    const noteText = `变式说明：${variation.variation_note}`
+    doc.text(noteText, MARGIN.left + labelWidth, cursorY, { width: CONTENT_WIDTH - labelWidth })
+    cursorY = doc.y
+    doc.restore()
+
+    doc.y = cursorY + 8
+  })
+
+  // 方法总结
+  if (input.summary.length > 0) {
+    ensureSpace(doc, 80)
+    doc.moveDown(0.8)
+    doc.font('hei').fontSize(12).fillColor('#111')
+    doc.text('二、方法总结', MARGIN.left, doc.y, { width: CONTENT_WIDTH })
+    doc.moveDown(0.4)
+    input.summary.forEach((line, index) => {
+      ensureSpace(doc, 26)
+      doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#222')
+      doc.text(`${index + 1}. ${line}`, MARGIN.left + 4, doc.y, { width: CONTENT_WIDTH - 8 })
+      doc.moveDown(0.15)
+    })
+  }
+
+  // 答案与解析单独起页
+  if (options.withAnswer) {
+    doc.addPage()
+    doc.font('hei').fontSize(14).fillColor('#111')
+    doc.text('参考答案与解析', MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+    doc.moveDown(0.8)
+    input.variations.forEach((variation, index) => {
+      ensureSpace(doc, 40)
+      doc.font('hei').fontSize(BODY_SIZE).fillColor('#111')
+      doc.text(`${index + 1}.`, MARGIN.left, doc.y, { width: 22, lineBreak: false })
+      const y = doc.y
+      doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
+      doc.text(variation.answer, MARGIN.left + 22, y, { width: CONTENT_WIDTH - 22 })
+      if (variation.explanation) {
+        doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#444')
+        doc.text(variation.explanation, MARGIN.left + 22, doc.y, { width: CONTENT_WIDTH - 22 })
+      }
+      doc.moveDown(0.3)
+    })
+  }
+
+  stampFooters(doc, input.title)
+  pageCount = doc.bufferedPageRange().count
+  doc.end()
+  return done
+}
+
+// ── 教学讲义：家教讲义式 ───────────────────────
+//
+// 讲义和卷子最大的不同是「有讲解区」，所以版式重心是分区和小标题：
+//   · 卷头只写主题 + 适用年级 + 学习目标（教学场景，不是考场）；
+//   · 每个 section 一个灰底小节标题，讲解内容按段落排，行距比卷子松（读起来不累）；
+//   · 例题用「题目 / 答案 / 解析」三段式，解析单独缩进；
+//   · 练习区留空让学生写，答案在最后单独一页。
+
+export interface LessonRenderInput {
+  title: string
+  topic: string
+  grade?: string
+  sections: Array<{ type: string; title: string; lines: string[] }>
+  example?: { stem: string; answer: string; explanation: string; options?: string[] }
+  exercises: Array<{ stem: string; answer: string; explanation: string; options?: string[] }>
+}
+
+export function renderLessonPdf(input: LessonRenderInput, options: RenderOptions): Promise<{ buffer: Buffer; pages: number }> {
+  const doc = new PDFDocument({
+    size: 'A4',
+    margins: MARGIN,
+    bufferPages: true,
+    info: { Title: input.title, Creator: 'dsh-exam-gen' },
+  })
+  registerFonts(doc)
+
+  const chunks: Buffer[] = []
+  doc.on('data', (chunk: Buffer) => chunks.push(chunk))
+  let pageCount = 0
+  const done = new Promise<{ buffer: Buffer; pages: number }>((resolve, reject) => {
+    doc.on('end', () => resolve({ buffer: Buffer.concat(chunks), pages: pageCount }))
+    doc.on('error', reject)
+  })
+
+  // 卷头
+  doc.font('hei').fontSize(17).fillColor('#111')
+  doc.text(input.title, MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+  doc.moveDown(0.4)
+  doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#555')
+  doc.text(`适用：${input.grade ?? ''}　　主题：${input.topic}　　本讲义配套 ${input.exercises.length} 道练习`, {
+    width: CONTENT_WIDTH,
+    align: 'center',
+  })
+
+  doc.moveDown(0.8)
+
+  // 小节标题：左侧一道短竖线 + 黑体，和卷子的「一、二、」编号区分开
+  const sectionTitle = (text: string) => {
+    ensureSpace(doc, 50)
+    doc.moveDown(0.5)
+    const y = doc.y
+    doc.save()
+    doc.rect(MARGIN.left, y + 1.5, 3, 13).fill('#333')
+    doc.restore()
+    doc.font('hei').fontSize(12.5).fillColor('#111')
+    doc.text(text, MARGIN.left + 10, y, { width: CONTENT_WIDTH - 10 })
+    doc.moveDown(0.35)
+  }
+
+  const paragraph = (text: string, indent = 0, size = BODY_SIZE, color = '#222') => {
+    ensureSpace(doc, 30)
+    doc.font('song').fontSize(size).fillColor(color)
+    doc.text(text, MARGIN.left + indent, doc.y, { width: CONTENT_WIDTH - indent, lineGap: 3 })
+    doc.moveDown(0.2)
+  }
+
+  for (const section of input.sections) {
+    if (section.type === 'example') {
+      sectionTitle(section.title)
+      if (!input.example) continue
+      const example = input.example
+      paragraph(example.stem)
+      if (example.options?.length) {
+        const y = drawOptions(doc, example.options, doc.y)
+        doc.y = y
+      }
+      paragraph(`答案：${example.answer}`, 0, BODY_SIZE - 0.5, '#111')
+      if (example.explanation) {
+        // 解析单独缩进 + 左侧细线，和题目区分开
+        ensureSpace(doc, 40)
+        const startY = doc.y
+        doc.save()
+        doc.rect(MARGIN.left + 8, startY, 1.4, Math.max(12, doc.heightOfString(example.explanation, { width: CONTENT_WIDTH - 40 }))).fill('#ccc')
+        doc.restore()
+        doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#444')
+        doc.text(`解析：${example.explanation}`, MARGIN.left + 18, startY, { width: CONTENT_WIDTH - 26, lineGap: 3 })
+        doc.moveDown(0.3)
+      }
+    } else if (section.type === 'exercise') {
+      sectionTitle(section.title)
+      input.exercises.forEach((item, index) => {
+        ensureSpace(doc, 52)
+        const startY = doc.y
+        // 题号并进 flowMath 一起排版，否则题号和题干会差一行（各自用不同的 y 基准）
+        let cursorY = flowMath(doc, `${index + 1}. ${normalizeExponents(item.stem)}`, MARGIN.left, startY, CONTENT_WIDTH, { size: BODY_SIZE })
+        if (item.options?.length) {
+          cursorY = drawOptions(doc, item.options, cursorY + 3)
+        }
+        // 留作答空间
+        doc.save()
+        doc.lineWidth(0.6).strokeColor('#bbb')
+        for (let line = 0; line < 3; line += 1) {
+          const ly = cursorY + 10 + line * 18
+          doc.moveTo(MARGIN.left, ly).lineTo(MARGIN.left + CONTENT_WIDTH - 40, ly).stroke()
+        }
+        doc.restore()
+        doc.y = cursorY + 10 + 3 * 18 + 6
+      })
+    } else {
+      sectionTitle(section.title)
+      section.lines.forEach((line) => paragraph(line))
+    }
+  }
+
+  // 练习答案单独一页
+  if (options.withAnswer && input.exercises.length > 0) {
+    doc.addPage()
+    doc.font('hei').fontSize(14).fillColor('#111')
+    doc.text('练习答案', MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+    doc.moveDown(0.8)
+    input.exercises.forEach((item, index) => {
+      ensureSpace(doc, 40)
+      // 编号和答案写在同一行：分开画会因 width 限制各起一行，看起来像错位
+      doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
+      doc.text(`${index + 1}. ${item.answer}`, MARGIN.left, doc.y, { width: CONTENT_WIDTH })
+      if (item.explanation) {
+        doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#444')
+        doc.text(item.explanation, MARGIN.left + 22, doc.y, { width: CONTENT_WIDTH - 22 })
+      }
+      doc.moveDown(0.4)
+    })
+  }
+
+  stampFooters(doc, input.title)
+  pageCount = doc.bufferedPageRange().count
+  doc.end()
+  return done
+}
+
+function normalizeType(type: string): 'choice' | 'fill' | 'solve' {
+  if (type === 'choice') return 'choice'
+  if (type === 'fill') return 'fill'
+  return 'solve'
+}
+
+function chineseNumber(n: number): string {
+  return ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'][n - 1] ?? String(n)
+}
+
+// ── 教材同步：同步练习页 ────────────────────────────────────────
+//
+// 和试卷的区别不是换个标题，是换一套版式：
+//   · 卷头不摆「注意事项」大框，改成教材信息行（版本 / 章节 / 课时 / 满分）；
+//   · 题目按「基础题 / 提高题」两区排列，而不是按题型；
+//   · 每题右侧留一个掌握度勾选格（□会 □不太会），老师可以直接印出来发下去；
+//   · 每题末尾标出对应知识点，学生知道这题考的是哪一段。
+
+export interface SyncRenderOptions extends RenderOptions {
+  /** 教材版本，进卷头信息行（人教版 / 北师大版…）。 */
+  textbook?: string
+  /** 课时名（教材同步的 lesson 参数）。 */
+  lesson?: string
+}
+
+export function renderSyncPdf(paper: PaperResult, options: SyncRenderOptions): Promise<{ buffer: Buffer; pages: number }> {
+  const doc = new PDFDocument({
+    size: 'A4',
+    margins: MARGIN,
+    bufferPages: true,
+    info: { Title: paper.title, Creator: 'dsh-exam-gen' },
+  })
+  registerFonts(doc)
+
+  const chunks: Buffer[] = []
+  doc.on('data', (chunk: Buffer) => chunks.push(chunk))
+  let pageCount = 0
+  const done = new Promise<{ buffer: Buffer; pages: number }>((resolve, reject) => {
+    doc.on('end', () => resolve({ buffer: Buffer.concat(chunks), pages: pageCount }))
+    doc.on('error', reject)
+  })
+
+  const basic = paper.questions.filter((q) => q.tier !== 'advanced')
+  const advanced = paper.questions.filter((q) => q.tier === 'advanced')
+  const totalPoints = options.totalPoints ?? sumPoints(paper)
+
+  // 卷头
+  doc.font('hei').fontSize(17).fillColor('#111')
+  doc.text(paper.title, MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
+  doc.moveDown(0.45)
+
+  doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#444')
+  const info = [options.textbook, options.lesson].filter(Boolean).join(' · ')
+  if (info) doc.text(info, { width: CONTENT_WIDTH, align: 'center' })
+
+  doc.moveDown(0.3)
+  doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#333')
+  doc.text(
+    `满分：${totalPoints} 分　　基础题 ${basic.length} 道　　提高题 ${advanced.length} 道`,
+    { width: CONTENT_WIDTH, align: 'center' },
+  )
+
+  doc.moveDown(0.6)
+  doc.lineWidth(0.8).strokeColor('#999')
+  const ruleY = doc.y
+  doc.moveTo(MARGIN.left, ruleY).lineTo(MARGIN.left + CONTENT_WIDTH, ruleY).stroke()
+  doc.moveDown(0.5)
+  doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#333')
+  doc.text('姓名：____________　　班级：____________　　日期：____________', MARGIN.left, doc.y, {
+    width: CONTENT_WIDTH,
+  })
+
+  let sectionNo = 0
+  const drawSection = (title: string, group: PaperQuestion[]) => {
+    if (group.length === 0) return
+    ensureSpace(doc, 46)
+    doc.moveDown(0.7)
+    doc.font('hei').fontSize(12).fillColor('#111')
+    doc.text(`${chineseNumber(++sectionNo)}、${title}`, MARGIN.left, doc.y, { width: CONTENT_WIDTH })
+    doc.moveDown(0.3)
+    group.forEach((question, i) => drawSyncQuestion(doc, i + 1, question))
+  }
+
+  drawSection('基础题（先把课本上的弄熟）', basic)
+  drawSection('提高题（往卷子难度上够一够）', advanced)
+
+  if (options.withAnswer) {
+    doc.addPage()
+    drawAnswerPage(doc, paper)
+  }
+
+  stampFooters(doc, paper.title)
+  pageCount = doc.bufferedPageRange().count
+  doc.end()
+  return done
+}
+
+function drawSyncQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQuestion): void {
+  const labelWidth = 22
+  // 右侧留出掌握度勾选格，题干宽度相应收窄
+  const checkWidth = 92
+  const bodyWidth = CONTENT_WIDTH - labelWidth - checkWidth
+
+  ensureSpace(doc, 46)
+  const startY = doc.y
+
+  doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
+  doc.text(`${number}.`, MARGIN.left, startY, { width: labelWidth, lineBreak: false })
+
+  let cursorY = flowMath(doc, normalizeExponents(question.content), MARGIN.left + labelWidth, startY, bodyWidth, {
+    size: BODY_SIZE,
+  })
+
+  const options = question.options ?? []
+  if (options.length > 0) {
+    cursorY += 3
+    cursorY = drawOptions(doc, options, cursorY)
+  } else if (normalizeType(question.type) === 'solve') {
+    const lines = Math.max(3, Math.min(10, Math.round((question.points || 10) / 3)))
+    cursorY += lines * BODY_LINE * 0.9
+  } else if (!/[＿_]{2,}/.test(question.content)) {
+    const lineY = cursorY + 7
+    doc.save()
+    doc.font('song').fontSize(SMALL_SIZE).fillColor('#666')
+    doc.text('答：', MARGIN.left + labelWidth, cursorY - 1, { width: 24, lineBreak: false })
+    doc.lineWidth(0.7).strokeColor('#333')
+    doc.moveTo(MARGIN.left + labelWidth + 26, lineY)
+    doc.lineTo(MARGIN.left + labelWidth + 200, lineY)
+    doc.stroke()
+    doc.restore()
+    cursorY += 20
+  } else {
+    cursorY += 6
+  }
+
+  // 右侧掌握度勾选格（每题的纵向中线对齐题干首行）
+  doc.save()
+  doc.font('song').fontSize(SMALL_SIZE - 0.5).fillColor('#888')
+  doc.text('□ 会    □ 不太会', MARGIN.left + CONTENT_WIDTH - checkWidth, startY + 1, {
+    width: checkWidth,
+    align: 'right',
+    lineBreak: false,
+  })
+  doc.restore()
+
+  // 知识点标注
+  if (question.topic) {
+    doc.save()
+    doc.font('song').fontSize(SMALL_SIZE - 1).fillColor('#777')
+    doc.text(`〔知识点：${question.topic}〕`, MARGIN.left + labelWidth, cursorY - 2, {
+      width: bodyWidth,
+      lineBreak: false,
+    })
+    doc.restore()
+    cursorY += 12
+  }
+
+  doc.y = cursorY + 8
+}

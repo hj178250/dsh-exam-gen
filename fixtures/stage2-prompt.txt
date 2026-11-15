@@ -1,0 +1,14 @@
+# 规范化后的参数
+{"grade":"初一","subject":"数学","scope":"一元一次方程","count":3,"difficulty":"中等","types":"choice","withAnswer":true}
+# 检索命中 2 条（每行：分数 | 章节 | 正文）
+3 | 一元一次方程 | 若 2x-3=7，则 x 的值是（　）
+3 | 一元一次方程 | 解方程 3(x-1)=2x+4，下列步骤最先出错的是（　）
+# Prompt 正文（473 字符，中文 161 字）
+你是初一数学老师，出一套单选题。只输出 JSON，不要解释、不要 Markdown 围栏。
+参数：范围=一元一次方程；数量=3；难度=中等；每题分值=5
+结构：{"title":"卷名","questions":[{"type":"choice|fill|solve","content":"题干","options":["A 项原文"],"answer":"答案原文","points":5,"analysis":"解析"}]}
+规则：type 只能是 choice/fill/solve；choice 的 options 至少 2 项且 answer 必须逐字等于其中一项；fill 和 solve 的 options 给空数组；answer 不能为空；points 是正整数；不要出现参数范围以外的知识点。
+答案与解析照常给出（answer、analysis 字段填满）。
+风格参考（只借难度与句式，不要照抄、不要改数字照搬）：
+1) 若 2x-3=7，则 x 的值是（　）
+2) 解方程 3(x-1)=2x+4，下列步骤最先出错的是（　）

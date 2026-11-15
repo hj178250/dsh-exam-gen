@@ -1,0 +1,187 @@
+// 题库加载与检索索引。
+//
+// 设计要点：
+// 1. 启动后只读一次 bank.json（2 MB），内存里建 学科 → 条目 的倒排表，检索不碰磁盘。
+// 2. 打分只看三件事：年级匹配、章节/知识点命中、难度接近；同分时「非配图题」优先，
+//    因为题目描述依赖配图的题在纯文本生成里没法用。
+// 3. 所有对外结构都是纯数据，方便单测（不依赖 ctx）。
+import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+
+export interface BankItem {
+  id: string
+  stage?: string
+  grade?: string
+  subject?: string
+  chapter?: string
+  domain?: string
+  topic?: string
+  difficulty?: string
+  type?: string
+  content: string
+  options?: string[]
+  answer?: string
+  answerText?: string
+  explanation?: string
+  hasFigure?: boolean
+  source?: string
+}
+
+export interface BankIndex {
+  items: BankItem[]
+  bySubject: Map<string, BankItem[]>
+  chapters: Map<string, number>
+  size: number
+  license?: string
+}
+
+export interface BankQuery {
+  grade: string
+  subject: string
+  scope: string
+  difficulty?: string
+  limit?: number
+}
+
+const DIFF_ORDER = ['基础', '中档', '拔高']
+
+let cached: BankIndex | undefined
+let cachedKey = ''
+
+function normalizeText(text: string): string {
+  return text.toLowerCase().replace(/[\s，。；：、（）()【】\[\]{}"'“”‘’]/g, '')
+}
+
+/** 从 scope 与 chapter 里抽关键词：中文按 2 字滑窗，英文数字按整词。 */
+export function keywords(text: string): string[] {
+  const out = new Set<string>()
+  const cleaned = text.replace(/[，。；：、（）()【】\[\]{}"'“”‘’]/g, ' ')
+  for (const piece of cleaned.split(/\s+/)) {
+    if (!piece) continue
+    if (/^[a-z0-9.+-]+$/i.test(piece)) {
+      if (piece.length >= 2) out.add(piece.toLowerCase())
+      continue
+    }
+    // 中文：整段 + 2 字滑窗
+    if (piece.length <= 6) out.add(piece)
+    for (let i = 0; i + 2 <= piece.length; i += 1) out.add(piece.slice(i, i + 2))
+  }
+  return [...out]
+}
+
+async function readBankFile(file: string): Promise<BankItem[]> {
+  const raw = JSON.parse(await readFile(file, 'utf8')) as unknown
+  if (Array.isArray(raw)) return raw as BankItem[]
+  const obj = raw as { items?: BankItem[] }
+  return Array.isArray(obj.items) ? obj.items : []
+}
+
+/**
+ * 加载题库。优先 <dir>/bank.json，回退 <dir>/quiz-seed.json。
+ * 结果按 dir+mtime 缓存，换库或改库自动失效。
+ */
+export async function loadBank(dir: string): Promise<BankIndex> {
+  const bankFile = join(dir, 'bank.json')
+  const legacyFile = join(dir, 'quiz-seed.json')
+  const file = existsSync(bankFile) ? bankFile : existsSync(legacyFile) ? legacyFile : ''
+  if (!file) {
+    return { items: [], bySubject: new Map(), chapters: new Map(), size: 0 }
+  }
+  const key = `${file}`
+  if (cached && cachedKey === key) return cached
+
+  let items: BankItem[] = []
+  try {
+    items = await readBankFile(file)
+  } catch {
+    items = []
+  }
+  const bySubject = new Map<string, BankItem[]>()
+  const chapters = new Map<string, number>()
+  for (const item of items) {
+    if (!item?.content) continue
+    const subject = item.subject ?? ''
+    const bucket = bySubject.get(subject)
+    if (bucket) bucket.push(item)
+    else bySubject.set(subject, [item])
+    if (item.chapter) chapters.set(item.chapter, (chapters.get(item.chapter) ?? 0) + 1)
+  }
+  cached = { items, bySubject, chapters, size: items.length }
+  cachedKey = key
+  return cached
+}
+
+function scoreItem(item: BankItem, query: BankQuery, wanted: string[]): number {
+  let score = 0
+  if (item.grade && query.grade && item.grade === query.grade) score += 4
+  else if (item.grade && query.grade) {
+    // 同 stage 兜底：初一~初三 互认 1 分，高一~高三 互认 1 分
+    const junior = ['初一', '初二', '初三']
+    const senior = ['高一', '高二', '高三']
+    if (junior.includes(item.grade) && junior.includes(query.grade)) score += 1
+    if (senior.includes(item.grade) && senior.includes(query.grade)) score += 1
+  }
+  if (item.hasFigure) score -= 2
+  if (query.difficulty && item.difficulty) {
+    const delta = Math.abs(DIFF_ORDER.indexOf(item.difficulty) - DIFF_ORDER.indexOf(query.difficulty))
+    if (delta === 0) score += 2
+    else if (delta === 1) score += 1
+    else score -= 1
+  }
+  const haystack = normalizeText(`${item.chapter ?? ''}${item.topic ?? ''}${item.domain ?? ''}`)
+  for (const token of wanted) {
+    if (token.length < 2) continue
+    if (haystack.includes(normalizeText(token))) score += 2
+  }
+  // 真题来源优先：手工整理的那批带真实卷面问法和完整情境，是最像卷子的样本；
+  // 数据集里的诊断题只有在没有真题可选时才顶上。
+  if (item.source === 'public-corpus') score += 6
+  score += naturalness(item)
+  return score
+}
+
+/**
+ * 「这题印在卷子上像不像话」的粗略打分。
+ *
+ * 数据集里的题干有两种：一种带情境（"某班买了……共花了……"），一种是对知识点直问
+ * （"下列式子中，是方程的是哪一个？"）。后者连出 8 道就是甲方说的「僵硬」。
+ * 这里给带情境、有解析的题加分，给纯判断式题干减分，让选题偏向更像真题的那一批。
+ */
+function naturalness(item: BankItem): number {
+  const text = item.content ?? ''
+  let score = 0
+  if (item.explanation && item.explanation.length >= 8) score += 1
+  if (text.length >= 18 && text.length <= 90) score += 1
+  if (/^下列|^以下|^下面/.test(text)) score -= 1
+  if (/(多少|几|求|已知|若|某|如图|计算|化简)/.test(text)) score += 1
+  if (/（\s*）$/.test(text.trim())) score -= 0.5
+  return score
+}
+
+/**
+ * 检索参考题。返回分数降序的前 limit 条；分数 ≤0 的丢掉（避免给模型无关样例）。
+ * 学科必须一致，除非题库里没有该学科（此时放宽）。
+ */
+export function searchBank(index: BankIndex, query: BankQuery): BankItem[] {
+  const limit = Math.max(0, Math.min(query.limit ?? 2, 200))
+  if (limit === 0) return []
+  const pool = index.bySubject.get(query.subject) ?? []
+  const source = pool.length ? pool : index.items
+  const wanted = keywords(`${query.scope}`)
+  const scored: Array<{ item: BankItem; score: number }> = []
+  for (const item of source) {
+    if (item.stage === 'primary') continue
+    const score = scoreItem(item, query, wanted)
+    if (score > 0) scored.push({ item, score })
+  }
+  scored.sort((left, right) => right.score - left.score || left.item.id.localeCompare(right.item.id))
+  return scored.slice(0, limit).map((row) => row.item)
+}
+
+/** 题库概况，给工具描述/自检用。 */
+export function bankStats(index: BankIndex): { size: number; chapters: number; subjects: Record<string, number> } {
+  const subjects: Record<string, number> = {}
+  for (const [subject, list] of index.bySubject) subjects[subject || '(未标注)'] = list.length
+  return { size: index.size, chapters: index.chapters.size, subjects }
+}
