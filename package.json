@@ -34,7 +34,6 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node fixtures/selftest.mjs",
-    "prepare": "tsc -p tsconfig.json",
     "prepublishOnly": "tsc -p tsconfig.json",
     "postinstall": "node scripts/patch-tool-cards.mjs"
   },
