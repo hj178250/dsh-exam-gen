@@ -71,6 +71,9 @@ dsh plugin --profile <你的profile> add https://github.com/hj178250/dsh-exam-ge
 dsh plugin --profile <你的profile> add dsh-tool-cards
 ```
 
+**装完检查一行**（tgz / 本地文件安装的通病）：打开 profile 的 package.json，确认 dsh.profile.bundles 里有 dsh-exam-gen（装了卡片底座就再加 dsh-tool-cards）。pnpm 直接 dd 一个 tgz 不会自动写这一行，缺了插件不加载。
+
+
 装完在 DSH 里说一句就能用：
 
 ```
