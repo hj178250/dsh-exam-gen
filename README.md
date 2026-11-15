@@ -62,7 +62,7 @@ PDF 只在内存活 10 分钟（下完就散），题库是包内只读文件，
 ## 二、安装
 
 ```bash
-dsh plugin --profile <你的profile> add dsh-exam-gen
+dsh plugin --profile <你的profile> add https://github.com/hj178250/dsh-exam-gen/releases/download/v1.0.0/dsh-exam-gen-1.0.0.tgz
 ```
 
 （可选，想要参数卡片）再装一次卡片底座：
