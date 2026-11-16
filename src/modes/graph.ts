@@ -8,12 +8,13 @@
 // 模型只在「要公式/考频」时才需要出场（后续版本），骨架永远来自题库。
 import type { BankIndex, BankItem } from '../bank.js'
 import { QuizError } from '../errors.js'
+import { scopeCatalog } from '../exam-spec.js'
 
 export interface TreeNode {
   name: string
   /** 1=年级 2=章 3=节/知识点 */
   level: number
-  /** 这一节点及其子节点下的题目总数。 */
+  /** 这一节点及其子节点下的题目总数（目录兜底时为 0，表示「题库还没覆盖」）。 */
   count: number
   children: TreeNode[]
 }
@@ -27,6 +28,8 @@ export interface GraphResult {
   title: string
   nodes: TreeNode[]
   totalQuestions: number
+  /** true = 题库还没这几章的题，树来自插件内置人教版目录（骨架有了，题目待补）。 */
+  fromCatalog?: boolean
 }
 
 /**
@@ -70,9 +73,9 @@ export function buildKnowledgeTree(index: BankIndex, params: GraphParams): Graph
     if (!wantedGrade) return true
     return (item.grade ?? '').startsWith(wantedGrade) || (item.chapter ?? '').startsWith(wantedGrade)
   })
-  if (items.length === 0) {
-    throw new QuizError('BANK_MISS', `题库里还没有「${wantedGrade || subject}」的题，换一个科目或先加题`, 'graph')
-  }
+  // 题库没这几章的题时不再直接报错：甲方要的「每个年级知识点提前分类写死」就在这里兜底——
+  // 用插件内置的人教版目录先出一棵完整骨架，题量标 0，用户能看到「这学期要学哪些章」。
+  if (items.length === 0) return catalogTree(subject, wantedGrade)
 
   const gradeMap = new Map<string, Map<string, Map<string, number>>>()
   for (const item of items) {
@@ -122,6 +125,30 @@ export function buildKnowledgeTree(index: BankIndex, params: GraphParams): Graph
   }
 }
 
+/**
+ * 题库兜底：用 SCOPE_MAP 里写死的人教版目录造一棵树。
+ * 章节点是章节名，节节点暂空（目录里没有节级信息），题量统一 0 —— 明确表示「还没题」。
+ */
+function catalogTree(subject: string, wantedGrade: string): GraphResult {
+  const catalog = scopeCatalog()
+  const books = wantedGrade
+    ? catalog.filter((entry) => entry.book.startsWith(wantedGrade) || entry.book.includes(wantedGrade.replace(/^高|^初/, '')))
+    : catalog
+  const picked = books.length > 0 ? books : catalog
+  const nodes: TreeNode[] = picked.map((entry) => ({
+    name: entry.book,
+    level: 1,
+    count: 0,
+    children: entry.chapters.map((chapter) => ({ name: chapter, level: 2, count: 0, children: [] })),
+  }))
+  return {
+    title: `${wantedGrade ? `${wantedGrade}·` : ''}${subject} · 知识结构（教材目录 · 题库待补）`,
+    nodes,
+    totalQuestions: 0,
+    fromCatalog: true,
+  }
+}
+
 const CN_DIGIT: Record<string, number> = {
   一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
 }
@@ -158,11 +185,16 @@ function compareGrade(a: string, b: string): number {
 
 /** 渲染成纯文本层级列表（对话里直接用，和 PDF 同一份内容）。 */
 export function renderGraphText(result: GraphResult): string {
-  const lines: string[] = [`## ${result.title}`, '', `共 ${result.totalQuestions} 道题，覆盖 ${result.nodes.length} 个年级段。`, '']
+  const coverage = result.fromCatalog
+    ? `教材目录骨架（题库还没这几章的题，先按人教版目录列出要学什么）`
+    : `共 ${result.totalQuestions} 道题，覆盖 ${result.nodes.length} 个年级段`
+  const lines: string[] = [`## ${result.title}`, '', `${coverage}。`, '']
   result.nodes.forEach((grade, gi) => {
-    lines.push(`**${gi + 1}. ${grade.name}**（${grade.count} 题）`)
+    const suffix = grade.count > 0 ? `（${grade.count} 题）` : ''
+    lines.push(`**${gi + 1}. ${grade.name}**${suffix}`)
     grade.children.forEach((chapter, ci) => {
-      lines.push(`　${gi + 1}.${ci + 1} ${chapter.name}（${chapter.count} 题）`)
+      const chapterSuffix = chapter.count > 0 ? `（${chapter.count} 题）` : ''
+      lines.push(`　${gi + 1}.${ci + 1} ${chapter.name}${chapterSuffix}`)
       chapter.children.forEach((point, pi) => {
         lines.push(`　　${gi + 1}.${ci + 1}.${pi + 1} 第 ${point.name} 节（${point.count} 题）`)
       })

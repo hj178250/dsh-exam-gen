@@ -11,7 +11,7 @@ export const ADMIN_API = '/exam-bank/api'
 /** 导出的 PDF 从这里下载：/exam-pdf?id=<32位十六进制> */
 export const PDF_PATH = '/exam-pdf'
 
-export function adminPageHtml(token: string): string {
+export function adminPageHtml(token: string, enabled = true): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -68,6 +68,7 @@ dialog::backdrop{background:rgba(0,0,0,.55)}
   <span class="pill">dsh-exam-gen</span>
   <span class="pill" id="path-pill">正在读取…</span>
   <span style="flex:1"></span>
+  <button id="btn-toggle" class="${enabled ? 'primary' : ''}">${enabled ? '出题：已启用' : '出题：已关闭'}</button>
   <button id="btn-add" class="primary">新增题目</button>
   <button id="btn-export">导出当前结果</button>
   <button id="btn-import">导入 JSON</button>
@@ -215,6 +216,20 @@ rows.addEventListener('click', async (e) => {
 });
 
 $('btn-add').onclick = () => { $('add-msg').className = 'msg'; $('dlg-add').showModal(); };
+
+// 插件总开关：点了立刻生效，下次说「出套卷子」时插件就不接话了
+$('btn-toggle').onclick = async () => {
+  const btn = $('btn-toggle');
+  const on = /已启用/.test(btn.textContent);
+  try {
+    const d = await api('/exam-bank/api/toggle', { method: 'POST', body: JSON.stringify({ enabled: !on }) });
+    btn.textContent = d.enabled ? '出题：已启用' : '出题：已关闭';
+    btn.className = d.enabled ? 'primary' : '';
+    flash($('msg'), d.enabled ? '插件已启用：现在说「出套卷子」就会出。' : '插件已关闭：出题工具不再响应，普通对话不受影响。', true);
+  } catch (e) {
+    flash($('msg'), e.message, false);
+  }
+};
 $('f-type').onchange = () => { $('row-options').style.display = $('f-type').value === 'choice' ? '' : 'none'; };
 $('form-add').addEventListener('submit', async (e) => {
   if (e.submitter && e.submitter.value === 'cancel') return;

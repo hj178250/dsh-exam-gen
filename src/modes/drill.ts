@@ -23,6 +23,14 @@ export interface DrillParams {
   withAnswer: boolean
 }
 
+/** 专项里的一个「专题」：同一知识点下的细分考法。 */
+export interface DrillTopic {
+  /** 专题名（取题库的 topic 字段，退到 domain，再退到章节末段）。 */
+  name: string
+  /** 该专题在题库里有几道题。 */
+  count: number
+}
+
 export interface DrillVariation {
   stem: string
   answer: string
@@ -30,18 +38,51 @@ export interface DrillVariation {
   /** 这道题相对原型变了什么（不是空话，按难度和知识点模板生成）。 */
   variation_note: string
   difficulty: string
+  /** 这道题属于哪个专题。 */
+  topic?: string
 }
 
 export interface DrillResult {
   title: string
   topic: string
   variations: DrillVariation[]
+  /** 该知识点下的专题清单（甲方要求：专项练习要先把这个知识点拆成几个专题列出来）。 */
+  topics: DrillTopic[]
   /** 末尾「方法总结」，从这组题实际涉及的知识点聚合而来。 */
   summary: string[]
   points: number[]
 }
 
-const TYPE_NAME: Record<string, string> = { choice: '选择题', fill: '填空题', solve: '解答题' }
+const TYPE_NAME: Record<string, string> = {
+  choice: '单选题',
+  multi: '多选题',
+  fill: '填空题',
+  solve: '解答题',
+}
+
+/** 从题库条目里取「专题名」：topic → domain → 章节末段。 */
+function topicOf(item: BankItem): string {
+  const direct = (item.topic ?? '').trim()
+  if (direct) return direct
+  const domain = (item.domain ?? '').trim()
+  if (domain) return domain
+  const parts = (item.chapter ?? '').split(/\s+/).filter(Boolean)
+  return parts[parts.length - 1] ?? '综合'
+}
+
+/** 把池子里的题按专题归堆，得到「这个知识点下有哪些专题」。 */
+function collectTopics(pool: BankItem[], limit = 8): DrillTopic[] {
+  const counter = new Map<string, number>()
+  for (const item of pool) {
+    const name = topicOf(item)
+    if (!name) continue
+    counter.set(name, (counter.get(name) ?? 0) + 1)
+  }
+  return [...counter.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit)
+}
 
 /** 按题干特征说清「这题变在哪」，而不是「多练一道」。 */
 function variationNote(item: BankItem, index: number): string {
@@ -106,7 +147,11 @@ export function buildDrill(index: BankIndex, params: DrillParams): DrillResult {
     explanation: (item.explanation ?? '').trim(),
     variation_note: variationNote(item, index),
     difficulty: item.difficulty ?? '中等',
+    topic: topicOf(item),
   }))
+
+  // 专题清单来自整个池子（不是只挑中的那几道），这样「这个知识点下有哪些考法」才是全的。
+  const topics = collectTopics(pool)
 
   // 章节名形如「七上 第五章 一元一次方程 5.1.1」，总结里只保留到章，去掉节号
   const chapters = [
@@ -119,6 +164,9 @@ export function buildDrill(index: BankIndex, params: DrillParams): DrillResult {
   const difficulties = [...new Set(variations.map((v) => v.difficulty))]
   const summary = [
     `本组覆盖：${chapters.join('、') || topic}`,
+    topics.length > 1
+      ? `本知识点包含 ${topics.length} 个专题：${topics.map((t) => `${t.name}（${t.count} 题）`).join('、')}`
+      : `本知识点直接按${variations.length} 道递进题练透`,
     `难度走向：${difficulties.join(' → ')}（共 ${variations.length} 道）`,
     `做题顺序：先把「${picked[0]?.difficulty ?? '基础'}」那几道做对再做后面的，错题回到对应知识点重看解析`,
   ]
@@ -128,16 +176,25 @@ export function buildDrill(index: BankIndex, params: DrillParams): DrillResult {
     title,
     topic,
     variations,
+    topics,
     summary,
-    points: picked.map((item) => (item.type === 'solve' ? 10 : item.type === 'choice' ? 3 : 4)),
+    points: picked.map((item) =>
+      item.type === 'solve' ? 10 : item.type === 'multi' ? 6 : item.type === 'choice' ? 3 : 4,
+    ),
   }
 }
 
 /** 对话里直接展示的文本版（和 PDF 同一份内容）。 */
 export function renderDrillText(result: DrillResult): string {
   const lines: string[] = [`## ${result.title}`, '', `${result.variations.length} 道，按难度递进排列。`, '']
+  if (result.topics.length > 1) {
+    lines.push('### 本知识点覆盖的专题')
+    result.topics.forEach((topic, index) => lines.push(`${index + 1}. ${topic.name}（题库 ${topic.count} 题）`))
+    lines.push('')
+  }
   result.variations.forEach((variation, index) => {
-    lines.push(`**${index + 1}.**（${variation.difficulty}）${variation.stem}`)
+    const badge = variation.topic ? `［${variation.topic}］` : ''
+    lines.push(`**${index + 1}.**（${variation.difficulty}）${badge}${variation.stem}`)
     lines.push(`　变式说明：${variation.variation_note}`)
     lines.push('')
   })

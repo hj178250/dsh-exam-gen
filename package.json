@@ -1,12 +1,15 @@
 {
   "name": "dsh-exam-gen",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "DSH 出题插件：初中/高中理科组卷、专项突破、教学讲义、知识图谱、教材同步，本地渲染可打印 PDF，模型走你自己的 DSH。",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./client": {
+      "default": "./dist/client.js"
+    }
   },
   "keywords": [
     "dsh",
@@ -28,26 +31,25 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run sync:client",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node fixtures/selftest.mjs",
     "prepublishOnly": "tsc -p tsconfig.json",
-    "postinstall": "node scripts/patch-tool-cards.mjs"
+    "sync:client": "node scripts/sync-client.mjs"
   },
   "dependencies": {
-    "pdfkit": "^0.20.2"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.1.0",
+    "pdfkit": "^0.20.2",
     "dsh-tool-cards": "^0.2.2"
   },
-  "peerDependenciesMeta": {
-    "dsh-tool-cards": {
-      "optional": true
-    }
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.1.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",

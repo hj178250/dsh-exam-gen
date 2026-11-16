@@ -10,6 +10,7 @@
 //   折叠 1 层  →  Popover「更多设置」，装难度、题型、答案页等低频项
 //   底部 1 键  →  唯一的出口，文案描述用户的下一步动作
 // Popover 的开关是组件本地状态，纯本地展开，零往返、零额外 token。
+import { specFor, totalCount } from './exam-spec.js';
 /* --------------------------------- 取值表 --------------------------------- */
 const GRADES = [
     { label: '初一', value: '初一' },
@@ -19,11 +20,22 @@ const GRADES = [
     { label: '高二', value: '高二' },
     { label: '高三', value: '高三' },
 ];
+/** 多选年级的状态键：grade::初一 这类，Checkboxes 组件逐项绑定。 */
+export function gradeStateKey(value) {
+    return `grade::${value}`;
+}
 const SUBJECTS = [
     { label: '数学', value: '数学' },
     { label: '物理', value: '物理' },
     { label: '化学', value: '化学' },
     { label: '生物', value: '生物' },
+];
+// 学段：甲方要「中考 / 高考」入口。选中后写进 brief，parse-brief 已把
+// 「高考」映射高三、「中考」映射初三；这里只影响卷面规格（高考卷/中考卷）。
+const STAGES = [
+    { label: '不限', value: '' },
+    { label: '中考', value: '中考' },
+    { label: '高考', value: '高考' },
 ];
 // 范围用输入框而不是下拉：十来个章节选项要占掉两百多字符的载荷，
 // 而这份 JSON 是模型逐字复述的 —— 每多一个字符都多一分输出成坏 JSON 的风险。
@@ -35,7 +47,9 @@ const DIFFICULTY = [
     { label: '拔高', value: '拔高' },
 ];
 const TYPES = [
-    { label: '选择题', value: 'choice' },
+    { label: '混合', value: 'mixed' },
+    { label: '单选题', value: 'choice' },
+    { label: '多选题', value: 'multi' },
     { label: '填空题', value: 'fill' },
     { label: '解答题', value: 'solve' },
 ];
@@ -61,12 +75,15 @@ const EXAM_FREQ = [
     { label: '标注考频', value: 'true' },
     { label: '不标注', value: 'false' },
 ];
+// 教材版本：与 knowledge-catalog.ts 的 EDITIONS 完全对齐（5 版）。
 const TEXTBOOKS = [
     { label: '人教版', value: '人教版' },
     { label: '北师大版', value: '北师大版' },
+    { label: '沪教版', value: '沪教版' },
+    { label: '华师大版', value: '华师大版' },
     { label: '苏教版', value: '苏教版' },
-    { label: '沪科版', value: '沪科版' },
 ];
+const TEXTBOOK_F = { key: 'textbook', type: 'Select', label: '教材版本', options: TEXTBOOKS, defaultValue: '人教版' };
 const RATIO = [
     { label: '基础为主 7:3', value: '7:3' },
     { label: '均衡 5:5', value: '5:5' },
@@ -77,21 +94,25 @@ const RATIO = [
 // 年级 6 个选项超过 Segmented 的 5 项上限（会被自动降级成下拉），所以直接用 Select，
 // 免得"文档里是胶囊、实现里是下拉"这种落差。
 const GRADE = { key: 'grade', type: 'Select', label: '年级', options: GRADES };
+// 甲方要求：年级可多选（初一+初二、高一+高二+高三同选 → 跨年级知识点卷）。
+// 用一组 Checkbox 逐项绑 grade::初一 这类状态键，提交时全部带出。
+const GRADE_MULTI = { key: 'grade', type: 'Checkboxes', label: '年级（可多选）', options: GRADES };
+const STAGE_F = { key: 'stage', type: 'Segmented', label: '学段', options: STAGES };
 const SUBJECT = { key: 'subject', type: 'Segmented', label: '科目', options: SUBJECTS };
 const SCOPE = { key: 'scope', type: 'Input', label: '范围', placeholder: '留空=自动取核心章节' };
-const COUNT = { key: 'count', type: 'Slider', label: '数量', min: 1, max: 20, step: 1, unit: '题' };
+const COUNT = { key: 'count', type: 'Slider', label: '数量', min: 1, max: 30, step: 1, unit: '题' };
 const DIFFICULTY_F = { key: 'difficulty', type: 'Segmented', label: '难度', options: DIFFICULTY, defaultValue: '中等' };
 const TYPES_F = { key: 'types', type: 'Segmented', label: '题型', options: TYPES };
 const ANSWER_F = { key: 'withAnswer', type: 'Segmented', label: '答案页', options: ANSWER };
 const MODES = {
     paper: {
         title: '出题参数',
-        subtitle: '智能组卷 · 已按默认值预填，直接点下面就能出卷',
+        subtitle: '智能组卷 · 年级可多选（跨年级组卷）· 已按默认值预填',
         submitLabel: '生成试卷',
-        // 常显只留三个真正会改的：年级、科目、题量。其余全收进「更多设置」——
-        // 少一行字段就少几十个字符的模型输出，卡片 JSON 越短越不容易生成失败。
-        always: [GRADE, SUBJECT, COUNT],
-        more: [SCOPE, DIFFICULTY_F, TYPES_F, ANSWER_F],
+        // 甲方要求：年级可多选 + 中考/高考学段 + 题量。学段与多选年级放常显。
+        // 其余全收进「更多设置」——少一行字段就少几十个字符的模型输出。
+        always: [GRADE_MULTI, STAGE_F, SUBJECT, COUNT],
+        more: [SCOPE, TEXTBOOK_F, DIFFICULTY_F, TYPES_F, ANSWER_F],
     },
     drill: {
         title: '专项参数',
@@ -130,6 +151,16 @@ const MODES = {
 function defaultsOf(fields) {
     const values = {};
     for (const field of fields) {
+        if (field.type === 'Checkboxes') {
+            // 多选年级：每个选项一个布尔状态键，默认只选第一个（初一）。
+            // 同时保留 grade 字符串，兼容下游只读单个年级的分支。
+            const options = field.options ?? [];
+            options.forEach((opt, i) => {
+                values[gradeStateKey(opt.value)] = i === 0;
+            });
+            values[field.key] = options[0]?.value ?? '';
+            continue;
+        }
         if (field.defaultValue !== undefined) {
             values[field.key] = field.defaultValue;
             continue;
@@ -144,6 +175,20 @@ function defaultsOf(fields) {
 }
 function nodeOf(field) {
     // label 必须放在 props 里：组件从 element.props.label 取字段标题，协议级 node.label 只是壳。
+    if (field.type === 'Checkboxes') {
+        // 一组复选框，每个绑 `grade::值` 布尔状态键；Column 把它们竖排，比横排胶囊更清楚。
+        return {
+            id: field.key,
+            type: 'Column',
+            props: { label: field.label, gap: 4 },
+            children: (field.options ?? []).map((opt) => ({
+                id: gradeStateKey(opt.value),
+                type: 'Checkbox',
+                bind: gradeStateKey(opt.value),
+                props: { label: opt.label },
+            })),
+        };
+    }
     if (field.type === 'Slider') {
         return {
             id: field.key,
@@ -190,6 +235,13 @@ export function buildParamCard(mode, preset = {}) {
     const spec = MODES[mode] ?? MODES.paper;
     const all = [...spec.always, ...spec.more];
     const baseline = defaultsOf(all);
+    // 题量默认 = 该年级科目对应的「真实卷面」题量（初中 22、高中 18），而不是写死 5 道。
+    // 用户改过 count 就尊重他（preset.count 会覆盖），没改过就是完整一套卷。
+    if (all.some((field) => field.key === 'count')) {
+        const grade = String(preset.grade ?? baseline.grade ?? '初一');
+        const subject = String(preset.subject ?? baseline.subject ?? '数学');
+        baseline.count = totalCount(specFor(grade, subject));
+    }
     // 只接受表里声明过的键，避免模型塞进来一堆没用的状态（也避免 60 键上限被吃掉）。
     const values = { ...baseline };
     for (const field of all) {
@@ -197,6 +249,20 @@ export function buildParamCard(mode, preset = {}) {
         if (given === undefined || given === null || given === '')
             continue;
         values[field.key] = typeof given === 'boolean' ? String(given) : given;
+    }
+    // 多选年级：preset.grade 可能是「初一,初二」逗号串或数组，展开到各 grade:: 布尔键。
+    if (all.some((field) => field.type === 'Checkboxes')) {
+        const rawGrade = preset.grade ?? values.grade;
+        const picked = Array.isArray(rawGrade)
+            ? rawGrade.map(String)
+            : String(rawGrade ?? '').split(/[,，、\s]+/).filter(Boolean);
+        const validGrades = new Set(GRADES.map((g) => g.value));
+        const chosen = picked.filter((g) => validGrades.has(g));
+        if (chosen.length > 0) {
+            for (const opt of GRADES)
+                values[gradeStateKey(opt.value)] = chosen.includes(opt.value);
+            values.grade = chosen.join(','); // 供下游 parseBrief 认多年级
+        }
     }
     const tree = {
         id: 'root',
@@ -220,6 +286,12 @@ export function buildParamCard(mode, preset = {}) {
             { id: 'go', type: 'Button', label: spec.submitLabel, props: { variant: 'primary' }, actionId: 'submit' },
         ],
     };
+    // 提交键：普通字段直接用 key；多选年级要同时带出
+    // ① grade:: 各布尔键（勾选状态）② grade 字符串（逗号串，下游 parseBrief 认多年级）。
+    // 学段 stage 是普通 Segmented，自动走 [field.key]。漏了 grade 字符串就白选。
+    const includeKeys = all.flatMap((field) => field.type === 'Checkboxes'
+        ? [field.key, ...(field.options ?? []).map((opt) => gradeStateKey(opt.value))]
+        : [field.key]);
     return {
         title: spec.title,
         ui: {
@@ -227,7 +299,7 @@ export function buildParamCard(mode, preset = {}) {
             initialState: values,
             tree,
             actions: {
-                submit: { kind: 'submitToAgent', operation: `exam-${mode}`, includeKeys: all.map((field) => field.key) },
+                submit: { kind: 'submitToAgent', operation: `exam-${mode}`, includeKeys },
             },
         },
     };
@@ -239,10 +311,10 @@ export function modeLabel(mode) {
 /**
  * 给模型的「最小调用骨架」。
  *
- * tree.id 就是 mode 标记：tools/post-execute 钩子读到它，才把完整布局补进结果。
- * ui.initialState 用来携带用户已经说过的参数（年级/科目/范围…），钩子把它当作预设值；
- * 没有绑定到控件的键不会渲染，所以这里多放几个键是安全的。
- * 一行一百来字符，模型照抄不会失败；整份卡片 JSON（1800 字符）让它复述则必坏。
+ * 为什么是骨架而不是完整 UI：模型把完整 1800 字符的 ui 重新序列化进 tool call 参数时，
+ * JSON 几乎必坏（MALFORMED_RESPONSE: tool input is invalid JSON，实测 4/4 失败）。
+ * 骨架只有一百来字符，模型能稳定照抄；tools/post-execute 钩子读到 tree.id，
+ * 再把完整布局补进结果。tree 里故意不写 children —— 这是给钩子的标记，不是缺漏。
  */
 export function cardCall(mode, preset = {}) {
     const spec = MODES[mode] ?? MODES.paper;

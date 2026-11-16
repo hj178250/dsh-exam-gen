@@ -116,7 +116,8 @@ check('extractJson 抠括号', extractJson('结果是 {"a":2} 完毕').a === 2, 
   const params = normalizePaperParams(undefined)
   const prompt = buildPaperPrompt(params, [])
   const cjk = (prompt.match(/[\u4e00-\u9fff]/g) ?? []).length
-  check('默认 prompt 长度', prompt.length < 900, `${prompt.length} 字符 / 中文 ${cjk} 字`)
+  // 完整卷会多一行「卷面结构」说明，预算从 900 提到 1200
+  check('默认 prompt 长度', prompt.length < 1200, `${prompt.length} 字符 / 中文 ${cjk} 字`)
 }
 
 const failed = rows.filter((row) => row.pass === 'FAIL')

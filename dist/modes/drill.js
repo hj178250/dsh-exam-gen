@@ -1,7 +1,37 @@
 import { searchBank } from '../bank.js';
 import { QuizError } from '../errors.js';
 const DIFF_ORDER = ['基础', '中等', '拔高'];
-const TYPE_NAME = { choice: '选择题', fill: '填空题', solve: '解答题' };
+const TYPE_NAME = {
+    choice: '单选题',
+    multi: '多选题',
+    fill: '填空题',
+    solve: '解答题',
+};
+/** 从题库条目里取「专题名」：topic → domain → 章节末段。 */
+function topicOf(item) {
+    const direct = (item.topic ?? '').trim();
+    if (direct)
+        return direct;
+    const domain = (item.domain ?? '').trim();
+    if (domain)
+        return domain;
+    const parts = (item.chapter ?? '').split(/\s+/).filter(Boolean);
+    return parts[parts.length - 1] ?? '综合';
+}
+/** 把池子里的题按专题归堆，得到「这个知识点下有哪些专题」。 */
+function collectTopics(pool, limit = 8) {
+    const counter = new Map();
+    for (const item of pool) {
+        const name = topicOf(item);
+        if (!name)
+            continue;
+        counter.set(name, (counter.get(name) ?? 0) + 1);
+    }
+    return [...counter.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+        .slice(0, limit);
+}
 /** 按题干特征说清「这题变在哪」，而不是「多练一道」。 */
 function variationNote(item, index) {
     const difficulty = item.difficulty ?? '中等';
@@ -71,7 +101,10 @@ export function buildDrill(index, params) {
         explanation: (item.explanation ?? '').trim(),
         variation_note: variationNote(item, index),
         difficulty: item.difficulty ?? '中等',
+        topic: topicOf(item),
     }));
+    // 专题清单来自整个池子（不是只挑中的那几道），这样「这个知识点下有哪些考法」才是全的。
+    const topics = collectTopics(pool);
     // 章节名形如「七上 第五章 一元一次方程 5.1.1」，总结里只保留到章，去掉节号
     const chapters = [
         ...new Set(picked
@@ -81,6 +114,9 @@ export function buildDrill(index, params) {
     const difficulties = [...new Set(variations.map((v) => v.difficulty))];
     const summary = [
         `本组覆盖：${chapters.join('、') || topic}`,
+        topics.length > 1
+            ? `本知识点包含 ${topics.length} 个专题：${topics.map((t) => `${t.name}（${t.count} 题）`).join('、')}`
+            : `本知识点直接按${variations.length} 道递进题练透`,
         `难度走向：${difficulties.join(' → ')}（共 ${variations.length} 道）`,
         `做题顺序：先把「${picked[0]?.difficulty ?? '基础'}」那几道做对再做后面的，错题回到对应知识点重看解析`,
     ];
@@ -89,15 +125,22 @@ export function buildDrill(index, params) {
         title,
         topic,
         variations,
+        topics,
         summary,
-        points: picked.map((item) => (item.type === 'solve' ? 10 : item.type === 'choice' ? 3 : 4)),
+        points: picked.map((item) => item.type === 'solve' ? 10 : item.type === 'multi' ? 6 : item.type === 'choice' ? 3 : 4),
     };
 }
 /** 对话里直接展示的文本版（和 PDF 同一份内容）。 */
 export function renderDrillText(result) {
     const lines = [`## ${result.title}`, '', `${result.variations.length} 道，按难度递进排列。`, ''];
+    if (result.topics.length > 1) {
+        lines.push('### 本知识点覆盖的专题');
+        result.topics.forEach((topic, index) => lines.push(`${index + 1}. ${topic.name}（题库 ${topic.count} 题）`));
+        lines.push('');
+    }
     result.variations.forEach((variation, index) => {
-        lines.push(`**${index + 1}.**（${variation.difficulty}）${variation.stem}`);
+        const badge = variation.topic ? `［${variation.topic}］` : '';
+        lines.push(`**${index + 1}.**（${variation.difficulty}）${badge}${variation.stem}`);
         lines.push(`　变式说明：${variation.variation_note}`);
         lines.push('');
     });

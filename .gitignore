@@ -4,3 +4,5 @@ out/
 *.log
 .DS_Store
 Thumbs.db
+exam-gen-reports/
+fixtures/test-open.mjs

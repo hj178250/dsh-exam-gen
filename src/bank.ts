@@ -8,6 +8,7 @@
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { stripLatex, stripLatexList } from './latex.js'
 
 export interface BankItem {
   id: string
@@ -96,6 +97,15 @@ export async function loadBank(dir: string): Promise<BankIndex> {
     items = await readBankFile(file)
   } catch {
     items = []
+  }
+  // 题库里的 LaTeX 在这里一次性转成纯文本：聊天窗口不会渲成碎行，pdf 那边还能把 1/2 排成上下结构
+  for (const item of items) {
+    if (!item) continue
+    if (item.content) item.content = stripLatex(item.content)
+    if (item.options) item.options = stripLatexList(item.options)
+    if (item.explanation) item.explanation = stripLatex(item.explanation)
+    if (item.answerText) item.answerText = stripLatex(item.answerText)
+    if (item.topic) item.topic = stripLatex(item.topic)
   }
   const bySubject = new Map<string, BankItem[]>()
   const chapters = new Map<string, number>()

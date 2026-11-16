@@ -1,4 +1,5 @@
 import { QuizError } from '../errors.js';
+import { scopeCatalog } from '../exam-spec.js';
 /**
  * 章节名拆解：以「七上 第五章 一元一次方程 5.1.1」为例
  *   七上        → 年级层
@@ -37,9 +38,10 @@ export function buildKnowledgeTree(index, params) {
             return true;
         return (item.grade ?? '').startsWith(wantedGrade) || (item.chapter ?? '').startsWith(wantedGrade);
     });
-    if (items.length === 0) {
-        throw new QuizError('BANK_MISS', `题库里还没有「${wantedGrade || subject}」的题，换一个科目或先加题`, 'graph');
-    }
+    // 题库没这几章的题时不再直接报错：甲方要的「每个年级知识点提前分类写死」就在这里兜底——
+    // 用插件内置的人教版目录先出一棵完整骨架，题量标 0，用户能看到「这学期要学哪些章」。
+    if (items.length === 0)
+        return catalogTree(subject, wantedGrade);
     const gradeMap = new Map();
     for (const item of items) {
         const chapter = (item.chapter ?? '').trim();
@@ -88,6 +90,29 @@ export function buildKnowledgeTree(index, params) {
         totalQuestions: items.length,
     };
 }
+/**
+ * 题库兜底：用 SCOPE_MAP 里写死的人教版目录造一棵树。
+ * 章节点是章节名，节节点暂空（目录里没有节级信息），题量统一 0 —— 明确表示「还没题」。
+ */
+function catalogTree(subject, wantedGrade) {
+    const catalog = scopeCatalog();
+    const books = wantedGrade
+        ? catalog.filter((entry) => entry.book.startsWith(wantedGrade) || entry.book.includes(wantedGrade.replace(/^高|^初/, '')))
+        : catalog;
+    const picked = books.length > 0 ? books : catalog;
+    const nodes = picked.map((entry) => ({
+        name: entry.book,
+        level: 1,
+        count: 0,
+        children: entry.chapters.map((chapter) => ({ name: chapter, level: 2, count: 0, children: [] })),
+    }));
+    return {
+        title: `${wantedGrade ? `${wantedGrade}·` : ''}${subject} · 知识结构（教材目录 · 题库待补）`,
+        nodes,
+        totalQuestions: 0,
+        fromCatalog: true,
+    };
+}
 const CN_DIGIT = {
     一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
 };
@@ -124,11 +149,16 @@ function compareGrade(a, b) {
 }
 /** 渲染成纯文本层级列表（对话里直接用，和 PDF 同一份内容）。 */
 export function renderGraphText(result) {
-    const lines = [`## ${result.title}`, '', `共 ${result.totalQuestions} 道题，覆盖 ${result.nodes.length} 个年级段。`, ''];
+    const coverage = result.fromCatalog
+        ? `教材目录骨架（题库还没这几章的题，先按人教版目录列出要学什么）`
+        : `共 ${result.totalQuestions} 道题，覆盖 ${result.nodes.length} 个年级段`;
+    const lines = [`## ${result.title}`, '', `${coverage}。`, ''];
     result.nodes.forEach((grade, gi) => {
-        lines.push(`**${gi + 1}. ${grade.name}**（${grade.count} 题）`);
+        const suffix = grade.count > 0 ? `（${grade.count} 题）` : '';
+        lines.push(`**${gi + 1}. ${grade.name}**${suffix}`);
         grade.children.forEach((chapter, ci) => {
-            lines.push(`　${gi + 1}.${ci + 1} ${chapter.name}（${chapter.count} 题）`);
+            const chapterSuffix = chapter.count > 0 ? `（${chapter.count} 题）` : '';
+            lines.push(`　${gi + 1}.${ci + 1} ${chapter.name}${chapterSuffix}`);
             chapter.children.forEach((point, pi) => {
                 lines.push(`　　${gi + 1}.${ci + 1}.${pi + 1} 第 ${point.name} 节（${point.count} 题）`);
             });

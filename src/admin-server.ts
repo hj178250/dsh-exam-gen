@@ -9,6 +9,7 @@ import { ADMIN_API, ADMIN_PATH, adminPageHtml, PDF_PATH } from './admin-page.js'
 import { appendItem, importItems, readBankFile, recomputeSummary, removeItem, toExportJson, bankPath, type ItemDraft } from './bank-store.js'
 import { loadBank, type BankItem } from './bank.js'
 import { getPdf } from './pdf-store.js'
+import { CATALOG, EDITIONS, listEditions, listGrades, listBooksForEdition, listChaptersForEdition, listPointsForEdition } from './knowledge-catalog.js'
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024
 
@@ -146,6 +147,10 @@ export interface AdminDeps {
   dir: string
   /** 是否启用（DSH_EXAM_ADMIN=1 或配置项）。 */
   enabled: boolean
+  /** 读当前插件开关（页面顶部那个开关用）。 */
+  isOn?: () => boolean
+  /** 切换插件开关，返回切换后的值。 */
+  setOn?: (on: boolean) => boolean
 }
 
 /**
@@ -182,7 +187,27 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
       path: ADMIN_PATH,
       handler: async (req, res) => {
         if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
-        return sendHtml(res, 200, adminPageHtml(token))
+        return sendHtml(res, 200, adminPageHtml(token, deps.isOn?.() !== false))
+      },
+    })
+
+    // 插件总开关：页面顶部的那个按钮打到这里，改完立刻生效，不用重启
+    const toggleRoute = webServer.register({
+      kind: 'exact',
+      path: `${apiBase}/toggle`,
+      handler: async (req, res) => {
+        // 同源即可：侧栏开关由页面自己发，页面上不一定带得到 token
+        if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '需要 POST' })
+        let body: { enabled?: boolean } | undefined
+        try {
+          body = (await readJsonBody(req)) as { enabled?: boolean } | undefined
+        } catch (error) {
+          return sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : '请求体无法解析' })
+        }
+        const next = body?.enabled !== false
+        const applied = deps.setOn ? deps.setOn(next) : next
+        return sendJson(res, 200, { ok: true, enabled: applied })
       },
     })
 
@@ -190,17 +215,66 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
       kind: 'exact',
       path: `${apiBase}/stats`,
       handler: async (req, res) => {
-        if (!sameOrigin(req) || !tokenOk(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
+        // 同源即可：侧栏面板靠它读「开/关」状态
+        if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
         const file = bankPath(deps.dir)
         const bank = await readBankFile(file)
         const index = await loadBank(deps.dir)
         return sendJson(res, 200, {
           ok: true,
+          enabled: deps.isOn?.() !== false,
           path: file,
           size: bank.items.length,
           summary: recomputeSummary(bank.items),
           license: bank.license,
           chapters: index.chapters.size,
+        })
+      },
+    })
+
+    // 知识点目录（只读）：参数卡「学科→年级→册→章→知识点→题型」的级联数据源。
+    // 走 HTTP 不走模型工具，浏览器 fetch 一次全量缓存，参数卡零延迟级联。
+    const catalogRoute = webServer.register({
+      kind: 'exact',
+      path: `${apiBase}/catalog`,
+      handler: async (req, res) => {
+        if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
+        const params = queryOf(req)
+        const subject = params.get('subject') ?? ''
+        const grade = params.get('grade') ?? ''
+        const edition = params.get('edition') ?? ''
+        const book = params.get('book') ?? ''
+        const chapter = params.get('chapter') ?? ''
+
+        // 顶层：全部学科 + 5 个版本
+        if (!subject) {
+          return sendJson(res, 200, {
+            ok: true,
+            subjects: CATALOG.map((s) => s.subject),
+            editions: [...EDITIONS],
+          })
+        }
+        // 学科已给但版本没给 → 只回该学科各年级 + 该学科实际开设的版本
+        if (!edition) {
+          return sendJson(res, 200, {
+            ok: true,
+            subject,
+            grades: listGrades(subject),
+            editions: listEditions(subject),
+          })
+        }
+        // 有版本、有年级 → 回该年级的册别列表
+        if (!book) {
+          return sendJson(res, 200, { ok: true, subject, grade, edition, books: listBooksForEdition(subject, grade, edition) })
+        }
+        // 有册别 → 回章节列表
+        if (!chapter) {
+          return sendJson(res, 200, { ok: true, subject, grade, edition, book, chapters: listChaptersForEdition(subject, grade, book, edition) })
+        }
+        // 有章节 → 回知识点列表（含题型）
+        return sendJson(res, 200, {
+          ok: true, subject, grade, edition, book, chapter,
+          points: listPointsForEdition(subject, grade, book, chapter, edition).map((pt) => ({ name: pt.name, types: pt.types })),
         })
       },
     })
@@ -304,7 +378,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
     })
 
     ctx.logger?.('dsh-exam-gen')?.info?.(`题库管理页：${ADMIN_PATH}`)
-    return [pageRoute, statsRoute, itemsRoute, addRoute, deleteRoute, importRoute, exportRoute, pdfRoute]
+    return [pageRoute, toggleRoute, statsRoute, catalogRoute, itemsRoute, addRoute, deleteRoute, importRoute, exportRoute, pdfRoute]
   })
 
   return ADMIN_PATH

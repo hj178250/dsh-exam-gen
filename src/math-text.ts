@@ -88,29 +88,187 @@ export function splitMath(input: string): MathToken[] {
   return tokens
 }
 
-/** 把 `^2`、`^{2}`、`^23`、`^{10}` 这类上标写法转成真上标字符；转不完整的保持原样。 */
+/** 把 `^2`、`^{2}`、`^{10}`、`^{-2}`、`^n` 这类上标写法转成真上标字符；转不完整的保持原样。 */
 export function normalizeExponents(input: string): string {
-  return input.replace(/\^\{?([-0-9n]+)\}?/g, (all, group: string) => {
+  // 花括号指数 ^{2}、^{-2}、^{10}、^{n}：花括号内允许负号（负指数）。
+  let out = input.replace(/\^\{(-?[0-9n]+)\}/g, (all, group: string) => {
+    const negative = group.startsWith('-')
+    const body = negative ? group.slice(1) : group
+    if (!canSuperscript(body)) return all
+    return (negative ? '⁻' : '') + [...body].map((ch) => toSup(ch)).join('')
+  })
+  // 裸指数 ^2、^23、^n：贪婪匹配数字/n，遇到「-」自然停。
+  //
+  // 这里踩过一个 bug：旧正则用 `[-0-9n]+`，字符类里的 `-` 会把「减法」和「化学电荷」都吸进来——
+  // `|a|^2-4a` 里的 `^2-4` 被整体当成指数，canSuperscript('2-4') 失败，于是 `^2` 永远转不成 `²`。
+  // 去掉字符类里的 `-` 之后：`^2-4a` → 匹配 `2` → `²-4a`；`CO3^2-` → 匹配 `2` → `CO3²-`；
+  // `^23` → 匹配 `23` → `²³`。三种情况都对了。
+  out = out.replace(/\^([0-9n]+)/g, (all, group: string) => {
     if (!canSuperscript(group)) return all
     return [...group].map((ch) => toSup(ch)).join('')
   })
+  return out
 }
 
 function toSup(ch: string): string {
   const map: Record<string, string> = {
     '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
     '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
-    'n': 'ⁿ',
+    'n': 'ⁿ', '-': '⁻',
   }
   return map[ch] ?? ch
 }
 
 /** 上标是否全部转换成功（有字符没有上标形式时返回 false）。 */
 export function canSuperscript(group: string): boolean {
-  return [...group].every((ch) => ch in { '0': 1, '1': 1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1, '7': 1, '8': 1, '9': 1, 'n': 1 })
+  return [...group].every((ch) => ch in { '0': 1, '1': 1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1, '7': 1, '8': 1, '9': 1, 'n': 1, '-': 1 })
 }
 
 /** 纯文本版（用于卡片/列表，不需要分式排版时）。 */
 export function mathPlain(input: string): string {
   return normalizeExponents(input)
+}
+
+/**
+ * 化学式规范化：把模型输出的线性化学式转成 Unicode 上下标。
+ * 只给化学卷用（数学卷走 normalizeExponents），避免把数学的 `x_1`、`2-3` 误改。
+ *
+ * 三条规则，由具体到宽泛：
+ *   1. 带 ^ 的电荷：`CO3^2-` → `CO₃²⁻`、`^3+` → `³⁺`、`^n-` → `ⁿ⁻`；
+ *   2. 裸离子电荷：`Na+` → `Na⁺`、`Ca2+` → `Ca²⁺`、`OH-` → `OH⁻`；
+ *   3. 原子数下标：`H2O` → `H₂O`、`C4H8O2` → `C₄H₈O₂`、`MnO2` → `MnO₂`。
+ *
+ * 下标只认「大写元素符号 + 数字」且数字后不跟 +/-(电荷)、也不跟另一个数字(下标只处理单数字，
+ * 多位数下标如 C₁₂H₂₂O₁₁ 由每个元素符号单独命中)。系数如 `2H2O` 的 2、`0.02 mol`、
+ * `22.4 L`、`100 mL` 都不会被误伤——它们前面不是元素符号。
+ */
+const SUB_DIGITS: Record<string, string> = {
+  '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
+  '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+}
+
+function toSub(ch: string): string {
+  return SUB_DIGITS[ch] ?? ch
+}
+
+function supDigits(group: string): string {
+  return [...group].map((ch) => toSup(ch)).join('')
+}
+
+export function normalizeChem(input: string): string {
+  let out = input
+  // 1. 带 ^ 的电荷：^2- → ²⁻、^3+ → ³⁺、^- → ⁻、^+ → ⁺。
+  out = out.replace(/\^(\d*)([+-])/g, (_all, num: string, sign: string) => {
+    return supDigits(num) + (sign === '+' ? '⁺' : '⁻')
+  })
+  // 2a. 独立原子带数字电荷（前面不是字母/数字）：Ca2+ → Ca²⁺、Fe3+ → Fe³⁺、Al3+ → Al³⁺、Ag+ → Ag⁺。
+  //     数字是电荷数，要上标；符号后面不能再是字母/数字。
+  out = out.replace(/(?<![A-Za-z0-9])([A-Z][a-z]?)(\d)([+-])(?![A-Za-z0-9])/g, (_all, atom: string, num: string, sign: string) => {
+    return atom + supDigits(num) + (sign === '+' ? '⁺' : '⁻')
+  })
+  // 2b. 多原子基团里的元素带数字电荷（前面是字母/数字）：HCO3- 的 O3- → O₃⁻、NO3- 的 O3- → O₃⁻、MnO4- 的 O4- → O₄⁻。
+  //     数字是原子数下标，符号是电荷上标。前置 lookbehind 区分「独立原子」（Ca2+）与「基团内原子」（HCO3- 里的 O3）。
+  out = out.replace(/(?<=[A-Za-z0-9])([A-Z][a-z]?)(\d)([+-])(?![A-Za-z0-9])/g, (_all, atom: string, num: string, sign: string) => {
+    return atom + toSub(num) + (sign === '+' ? '⁺' : '⁻')
+  })
+  // 3. 字母后的裸电荷：OH- → OH⁻、Cl- → Cl⁻、Na+ → Na⁺、H+ → H⁺、ClO- → ClO⁻。
+  //    符号后面不能再是字母/数字（否则会把「-H2O」这种连字符误当电荷）。
+  out = out.replace(/([A-Z][a-z]?)([+-])(?![A-Za-z0-9])/g, (_all, atom: string, sign: string) => {
+    return atom + (sign === '+' ? '⁺' : '⁻')
+  })
+  // 4. 原子数下标：H2O → H₂O、CO3 → CO₃、C4H8O2 → C₄H₈O₂、MnO2 → MnO₂。
+  //    数字后面不能是电荷符号或另一个数字（电荷已在 1~3 处理，多位数下标靠每个元素符号单独命中）。
+  out = out.replace(/([A-Z][a-z]?)(\d)(?![+\-0-9])/g, (_all, atom: string, digit: string) => {
+    return atom + toSub(digit)
+  })
+  return out
+}
+
+/**
+ * 把一段文本切成「普通 / 上标 / 下标」片段，供 PDF 层用「小字号 + Y 偏移」真排版。
+ *
+ * 为什么要这么做：Windows 宋体（simsun.ttc）只有 ¹²³ 三个上标字形，其余 Unicode
+ * 上下标（⁰⁴⁵⁶⁷⁸⁹ⁿ⁻⁺、₀₁₂₃…ₙ）统统缺字形——把这些字符直接交给字体，画出来是空白，
+ * 这就是「平方没写上去 / 有些字空了」的根因。解法：不依赖字体自带的上下标字形，
+ * 而是把上下标标记解析出来，用普通数字/字母 + 小字号 + 上下偏移真实地画出来。
+ *
+ * 统一收口的写法：
+ *   · Unicode 上下标字符：x²、xⁿ、a₁、S₇、CO₃²⁻、H⁺
+ *   · 花括号标记：x^{2}、a_{n+1}、2^{-3}
+ *   · 裸标记：x^2、a_n、S_7
+ */
+export type MathRun =
+  | { kind: 'base'; text: string }
+  | { kind: 'sup'; text: string }
+  | { kind: 'sub'; text: string }
+
+const UNI_SUP: Record<string, string> = {
+  '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+  '⁺': '+', '⁻': '-', '⁼': '=', '⁽': '(', '⁾': ')',
+  'ⁿ': 'n', 'ⁱ': 'i', 'ᵃ': 'a', 'ᵇ': 'b', 'ᶜ': 'c', 'ᵈ': 'd', 'ᵉ': 'e', 'ᶠ': 'f', 'ᵍ': 'g', 'ʰ': 'h',
+  'ʲ': 'j', 'ᵏ': 'k', 'ˡ': 'l', 'ᵐ': 'm', 'ᵒ': 'o', 'ᵖ': 'p', 'ʳ': 'r', 'ˢ': 's', 'ᵗ': 't', 'ᵘ': 'u',
+  'ᵛ': 'v', 'ʷ': 'w', 'ˣ': 'x', 'ʸ': 'y', 'ᶻ': 'z',
+}
+const UNI_SUB: Record<string, string> = {
+  '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9',
+  '₊': '+', '₋': '-', '₌': '=', '₍': '(', '₎': ')',
+  'ₐ': 'a', 'ₑ': 'e', 'ₕ': 'h', 'ᵢ': 'i', 'ⱼ': 'j', 'ₖ': 'k', 'ₗ': 'l', 'ₘ': 'm', 'ₙ': 'n', 'ₒ': 'o',
+  'ₚ': 'p', 'ᵣ': 'r', 'ₛ': 's', 'ₜ': 't', 'ᵤ': 'u', 'ᵥ': 'v', 'ₓ': 'x',
+}
+
+export function parseMathRuns(input: string): MathRun[] {
+  const runs: MathRun[] = []
+  let base = ''
+  const flush = (): void => {
+    if (base) { runs.push({ kind: 'base', text: base }); base = '' }
+  }
+  let i = 0
+  while (i < input.length) {
+    const ch = input[i]
+    // 1) Unicode 上标字符（连续成段）
+    if (ch in UNI_SUP) {
+      flush()
+      let s = ''
+      while (i < input.length && input[i] in UNI_SUP) { s += UNI_SUP[input[i]]; i++ }
+      runs.push({ kind: 'sup', text: s })
+      continue
+    }
+    // 2) Unicode 下标字符（连续成段）
+    if (ch in UNI_SUB) {
+      flush()
+      let s = ''
+      while (i < input.length && input[i] in UNI_SUB) { s += UNI_SUB[input[i]]; i++ }
+      runs.push({ kind: 'sub', text: s })
+      continue
+    }
+    // 3) 花括号 / 圆括号标记 ^{...} / _{...} / ^(...) / _(...)
+    //    模型常写成 a_(n+1)、^(6-2k)、2^(n+1)，圆括号里还能带 +/-/数字，都要认。
+    if (ch === '^' || ch === '_') {
+      const open = input[i + 1]
+      if (open === '{' || open === '(') {
+        const closeCh = open === '{' ? '}' : ')'
+        const close = input.indexOf(closeCh, i + 2)
+        if (close > i + 2 && close - i <= 14) {
+          flush()
+          runs.push({ kind: ch === '^' ? 'sup' : 'sub', text: input.slice(i + 2, close) })
+          i = close + 1
+          continue
+        }
+      }
+    }
+    // 4) 裸标记 ^abc / _abc
+    if (ch === '^' || ch === '_') {
+      const m = new RegExp(`^\\${ch}([0-9a-zA-Z]+)`).exec(input.slice(i))
+      if (m) {
+        flush()
+        runs.push({ kind: ch === '^' ? 'sup' : 'sub', text: m[1] })
+        i += m[0].length
+        continue
+      }
+    }
+    base += ch
+    i++
+  }
+  flush()
+  return runs
 }

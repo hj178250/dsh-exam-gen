@@ -10,8 +10,58 @@
  * 题目按「选择题 / 填空题 / 解答题」分节，选题 2~4 列对齐，答案单独起页。
  */
 import PDFDocument from 'pdfkit'
-import { splitMath, normalizeExponents, type MathToken } from './math-text.js'
+import { splitMath, normalizeExponents, normalizeChem, parseMathRuns, type MathToken, type MathRun } from './math-text.js'
 import type { PaperQuestion, PaperResult } from './modes/paper.js'
+
+/** 按学科选上标/下标处理：化学走 normalizeChem（化学式、离子电荷），其余走数学上标。 */
+function normalizeText(text: string, subject?: string): string {
+  return subject === '化学' ? normalizeChem(text) : normalizeExponents(text)
+}
+
+/**
+ * 把上标/下标标记解析成 run，交给 drawRuns 用小字号 + Y 偏移真实排版。
+ * 宋体缺 Unicode 上下标字形，直接画字符会空白——必须走这条路。
+ * 化学卷先过 normalizeChem（把 Ca2+ 变成 Ca²⁺ 这类标记），数学卷保持原样。
+ */
+function mathRuns(text: string, subject?: string): MathRun[] {
+  return parseMathRuns(normalizeText(text, subject))
+}
+
+/**
+ * 逐 run 画一行文字：base 用正文字号，sup/sub 用 ~62% 字号 + 上/下偏移。
+ * 返回这段文本占用的宽度。所有上下标都用普通 ASCII 数字/字母，绕开字体缺字形的问题。
+ */
+function drawRuns(
+  doc: PDFKit.PDFDocument,
+  runs: MathRun[],
+  x: number,
+  y: number,
+  size: number,
+): number {
+  const SUP_RATIO = 0.62
+  const SUP_LIFT = 0.42   // 上标相对基线上移（字号倍数）
+  const SUB_DROP = 0.20   // 下标相对基线下移（字号倍数）
+  let cursor = x
+  for (const run of runs) {
+    if (run.kind === 'base') {
+      // 整段画，减少 drawText 次数；外层 flowMath 已保证不超宽。
+      doc.font('song').fontSize(size).fillColor('#111')
+      const cw = doc.widthOfString(run.text)
+      doc.text(run.text, cursor, y, { lineBreak: false })
+      cursor += cw
+    } else {
+      const ss = size * SUP_RATIO
+      doc.font('song').fontSize(ss).fillColor('#111')
+      // 上标上移、下标下移；用普通字符，不依赖字体上下标字形
+      const dy = run.kind === 'sup' ? -size * SUP_LIFT : size * SUB_DROP
+      const text = run.text
+      const cw = doc.widthOfString(text)
+      doc.text(text, cursor, y + dy, { lineBreak: false })
+      cursor += cw
+    }
+  }
+  return cursor - x
+}
 
 // ── 版式常量（锁死，不对外暴露） ────────────────────────────────
 const A4 = { width: 595.28, height: 841.89 }
@@ -30,6 +80,7 @@ const FONTS = {
 
 const SECTION_ORDER: Array<{ type: string; title: string }> = [
   { type: 'choice', title: '选择题' },
+  { type: 'multi', title: '多项选择题' },
   { type: 'fill', title: '填空题' },
   { type: 'solve', title: '解答题' },
 ]
@@ -60,8 +111,8 @@ export function renderPaperPdf(paper: PaperResult, options: RenderOptions): Prom
     doc.on('error', reject)
   })
 
-  const totalPoints = options.totalPoints ?? sumPoints(paper)
-  drawHeader(doc, paper, totalPoints, options.examMinutes ?? estimateMinutes(paper))
+  const totalPoints = options.totalPoints ?? paper.meta?.totalPoints ?? sumPoints(paper)
+  drawHeader(doc, paper, totalPoints, options.examMinutes ?? paper.meta?.minutes ?? estimateMinutes(paper))
   drawQuestions(doc, paper)
 
   if (options.withAnswer) {
@@ -99,7 +150,8 @@ function drawHeader(doc: PDFKit.PDFDocument, paper: PaperResult, totalPoints: nu
   doc.moveDown(0.35)
   doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#333')
   const difficulty = paper.meta?.difficulty ? `　　难度：${paper.meta.difficulty}` : ''
-  doc.text(`考试时间：${minutes} 分钟　　满分：${totalPoints} 分${difficulty}`, { width: CONTENT_WIDTH, align: 'center' })
+  const label = paper.meta?.label ? `${paper.meta.label}　　` : ''
+  doc.text(`${label}考试时间：${minutes} 分钟　　满分：${totalPoints} 分${difficulty}`, { width: CONTENT_WIDTH, align: 'center' })
 
   doc.moveDown(0.7)
 
@@ -148,6 +200,9 @@ function drawHeader(doc: PDFKit.PDFDocument, paper: PaperResult, totalPoints: nu
 
 function drawQuestions(doc: PDFKit.PDFDocument, paper: PaperResult): void {
   let index = 0
+  // 题号跨板块连续（真高考卷就是 1~19 连排，不会每个板块又从 1 开始）
+  let serial = 0
+  const subject = paper.meta?.subject
   for (const section of SECTION_ORDER) {
     const group = paper.questions.filter((q) => normalizeType(q.type) === section.type)
     if (group.length === 0) continue
@@ -163,12 +218,13 @@ function drawQuestions(doc: PDFKit.PDFDocument, paper: PaperResult): void {
 
     group.forEach((question, i) => {
       const isLast = i === group.length - 1
-      drawQuestion(doc, i + 1, question, isLast)
+      serial += 1
+      drawQuestion(doc, serial, question, isLast, subject)
     })
   }
 }
 
-function drawQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQuestion, isLast: boolean): void {
+function drawQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQuestion, isLast: boolean, subject?: string): void {
   const labelWidth = 22
   ensureSpace(doc, 46)
   const startY = doc.y
@@ -176,14 +232,20 @@ function drawQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQu
   doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
   doc.text(`${number}.`, MARGIN.left, startY, { width: labelWidth, lineBreak: false })
 
-  let cursorY = flowMath(doc, normalizeExponents(question.content), MARGIN.left + labelWidth, startY, CONTENT_WIDTH - labelWidth, {
+  // 解答题的小问（(1)…；(2)…）常被模型写在同一行，真卷里是一行一问。
+  // 在「；」「。」后面紧跟小问编号处强制换行，模型没换行也能排成一行一问。
+  const content = normalizeType(question.type) === 'solve'
+    ? splitSubQuestions(normalizeText(question.content, subject))
+    : normalizeText(question.content, subject)
+
+  let cursorY = flowMath(doc, content, MARGIN.left + labelWidth, startY, CONTENT_WIDTH - labelWidth, {
     size: BODY_SIZE,
   })
 
   const options = question.options ?? []
   if (options.length > 0) {
     cursorY += 3
-    cursorY = drawOptions(doc, options, cursorY)
+    cursorY = drawOptions(doc, options, cursorY, subject)
   } else if (normalizeType(question.type) === 'solve') {
     // 解答题留作答空间（按分值给行数，卷面更像样）
     const lines = Math.max(4, Math.min(12, Math.round((question.points || 10) / 2.5)))
@@ -209,14 +271,25 @@ function drawQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQu
   doc.y = cursorY + (isLast ? 6 : 8)
 }
 
-function drawOptions(doc: PDFKit.PDFDocument, options: string[], top: number): number {
+/**
+ * 把小问编号前的分号/句号转成换行：
+ * `…短轴长为2。(1) 求方程；(2) 过点 P…` → `…短轴长为2。\n(1) 求方程；\n(2) 过点 P…`
+ *
+ * 只认「；」或「。」后面紧跟 `(1)`、`(2)`、`（3）` 这种「括号+纯数字」的小问头，
+ * 所以不会误伤数学里的 `P(0,2)`（括号里是 `0,2` 带逗号）、`f(x)=(x-1)(x+1)`（括号里是字母）。
+ */
+function splitSubQuestions(text: string): string {
+  return text.replace(/([；。])\s*(?=[（(]\d{1,2}[)）])/g, '$1\n')
+}
+
+function drawOptions(doc: PDFKit.PDFDocument, options: string[], top: number, subject?: string): number {
   const letters = 'ABCDEFGH'
   const indent = 22
   const usable = CONTENT_WIDTH - indent
 
   // 列数按「最长选项的实际渲染宽度」算，能塞几列就塞几列（2~4），避免长选项被硬折行
   doc.font('song').fontSize(BODY_SIZE)
-  const widest = Math.max(...options.map((option) => doc.widthOfString(normalizeExponents(option))), 1)
+  const widest = Math.max(...options.map((option) => doc.widthOfString(normalizeText(option, subject))), 1)
   const slot = widest + 26
   const columns = Math.max(2, Math.min(4, Math.floor(usable / slot)))
   const columnWidth = usable / columns
@@ -230,7 +303,7 @@ function drawOptions(doc: PDFKit.PDFDocument, options: string[], top: number): n
       const x = MARGIN.left + indent + j * columnWidth
       doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
       doc.text(`${letter}.`, x, y, { width: 15, lineBreak: false })
-      flowMath(doc, normalizeExponents(option), x + 15, y, columnWidth - 18, { size: BODY_SIZE })
+      flowMath(doc, normalizeText(option, subject), x + 15, y, columnWidth - 18, { size: BODY_SIZE })
     })
     y += rowHeight
   }
@@ -242,10 +315,13 @@ function drawAnswerPage(doc: PDFKit.PDFDocument, paper: PaperResult): void {
   doc.text('参考答案与解析', MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' })
   doc.moveDown(0.8)
 
-  // 选择题速查表
+  // 选择题速查表（单选 + 多选都进表）
   const choices = paper.questions
     .map((q, i) => ({ index: i + 1, q }))
-    .filter((row) => normalizeType(row.q.type) === 'choice' && row.q.answer)
+    .filter((row) => {
+      const type = normalizeType(row.q.type)
+      return (type === 'choice' || type === 'multi') && row.q.answer
+    })
   if (choices.length >= 4) {
     drawAnswerTable(doc, choices)
     doc.moveDown(0.8)
@@ -259,8 +335,8 @@ function drawAnswerPage(doc: PDFKit.PDFDocument, paper: PaperResult): void {
     doc.text(`${i + 1}．`, MARGIN.left, y, { width: 22, lineBreak: false })
 
     const parts: string[] = []
-    if (question.answer) parts.push(`答案：${normalizeExponents(String(question.answerText || question.answer))}`)
-    if (question.analysis) parts.push(`解析：${normalizeExponents(question.analysis)}`)
+    if (question.answer) parts.push(`答案：${normalizeText(String(question.answerText || question.answer), paper.meta?.subject)}`)
+    if (question.analysis) parts.push(`解析：${normalizeText(question.analysis, paper.meta?.subject)}`)
 
     doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#111')
     const endY = flowMath(doc, parts.join('　'), MARGIN.left + 22, y, CONTENT_WIDTH - 22, { size: BODY_SIZE - 0.5 })
@@ -301,31 +377,45 @@ function flowMath(
   style: { size: number },
 ): number {
   const size = style.size
-  const lineHeight = size * 1.62
+  const small = size * 0.86
+  // 普通行高照旧；含分式的行加高，给「分子在上、分母在下」留出上下空间。
+  const normalLine = size * 1.66
+  const fracLine = small * 2 + 12
   let x = startX
   let y = startY
   const rightEdge = startX + maxWidth
 
+  // 先按视觉行缓冲 token，再一次性画出：这样才知道这一行有没有分式、该用多高的行高。
+  // 旧实现是「边排边画」，分式的分子画到了上一行里，前后两个分式/两行文字就叠在一起。
+  let line: Array<{ token: MathToken; x: number }> = []
+  const flush = (): void => {
+    if (line.length === 0) return
+    const hasFrac = line.some((entry) => entry.token.kind === 'frac')
+    for (const entry of line) drawToken(doc, entry.token, entry.x, y, size, hasFrac)
+    y += hasFrac ? fracLine : normalLine
+    line = []
+  }
+
   const words = segment(text)
   for (const word of words) {
     if (word === '\n') {
+      flush()
       x = startX
-      y += lineHeight
       continue
     }
-
     const tokens = splitMath(word)
     for (const token of tokens) {
       const width = tokenWidth(doc, token, size)
       if (x + width > rightEdge && x > startX) {
+        flush()
         x = startX
-        y += lineHeight
       }
-      drawToken(doc, token, x, y, size)
+      line.push({ token, x })
       x += width
     }
   }
-  return y + lineHeight
+  flush()
+  return y
 }
 
 function segment(text: string): string[] {
@@ -357,23 +447,32 @@ function tokenWidth(doc: PDFKit.PDFDocument, token: MathToken, size: number): nu
   doc.font('song').fontSize(size * 0.86)
   const num = doc.widthOfString(token.num)
   const den = doc.widthOfString(token.den)
-  return Math.max(num, den) + 3
+  return Math.max(num, den) + 4
 }
 
-function drawToken(doc: PDFKit.PDFDocument, token: MathToken, x: number, y: number, size: number): void {
+function drawToken(
+  doc: PDFKit.PDFDocument,
+  token: MathToken,
+  x: number,
+  y: number,
+  size: number,
+  hasFrac = true,
+): void {
   if (token.kind === 'text') {
-    doc.font('song').fontSize(size).fillColor('#111')
-    doc.text(token.text, x, y, { lineBreak: false })
+    // 上下标不能靠字体字形（宋体只剩 ¹²³），要拆成 run 用小字号+Y偏移真排版。
+    drawRuns(doc, parseMathRuns(token.text), x, y, size)
     return
   }
 
-  // 分数：分子在基线上方 0.62em，分母在下方
+  // 分数：分子在上、分母在下，基线对齐同行的普通文字。
   const small = size * 0.86
   doc.font('song').fontSize(small).fillColor('#111')
   const numWidth = doc.widthOfString(token.num)
   const denWidth = doc.widthOfString(token.den)
-  const width = Math.max(numWidth, denWidth) + 3
-  const barY = y + size * 0.62
+  const width = Math.max(numWidth, denWidth) + 4
+  // 同行文字基线在 y 的顶端附近（pdfkit text() 的 y 是「文本行盒顶部」）；
+  // 分数线放在普通文字纵向中部，分子在线上、分母在线下。
+  const barY = y + (hasFrac ? size * 0.7 : size * 0.62)
 
   doc.text(token.num, x + (width - numWidth) / 2, barY - small - 1.2, { lineBreak: false })
   doc.text(token.den, x + (width - denWidth) / 2, barY + 1.6, { lineBreak: false })
@@ -493,7 +592,10 @@ export interface DrillRenderInput {
     explanation: string
     variation_note: string
     difficulty: string
+    topic?: string
   }>
+  /** 该知识点下的专题清单（有就单独排一段「本知识点覆盖的专题」）。 */
+  topics?: Array<{ name: string; count: number }>
   summary: string[]
 }
 
@@ -532,6 +634,33 @@ export function renderDrillPdf(input: DrillRenderInput, options: RenderOptions):
   doc.moveDown(0.6)
 
   doc.font('hei').fontSize(12).fillColor('#111')
+  doc.text('〇、本知识点覆盖的专题', MARGIN.left, doc.y, { width: CONTENT_WIDTH })
+  doc.moveDown(0.3)
+  const topicList = input.topics && input.topics.length > 1 ? input.topics : []
+  if (topicList.length > 0) {
+    // 两列排，省纸；每个专题后面带题库题量，学生知道哪块能刷够
+    const half = Math.ceil(topicList.length / 2)
+    const colWidth = CONTENT_WIDTH / 2
+    const startY = doc.y
+    let leftY = startY
+    let rightY = startY
+    topicList.forEach((topic, index) => {
+      const isLeft = index < half
+      const x = MARGIN.left + (isLeft ? 0 : colWidth)
+      const y = isLeft ? leftY : rightY
+      doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#222')
+      doc.text(`${index + 1}. ${topic.name}（${topic.count} 题）`, x + 2, y, { width: colWidth - 8 })
+      if (isLeft) leftY = doc.y
+      else rightY = doc.y
+    })
+    doc.y = Math.max(leftY, rightY) + 4
+  } else {
+    doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#444')
+    doc.text(`本知识点直接按 ${input.variations.length} 道递进题练透。`, MARGIN.left + 2, doc.y, { width: CONTENT_WIDTH - 8 })
+  }
+
+  doc.moveDown(0.7)
+  doc.font('hei').fontSize(12).fillColor('#111')
   doc.text('一、题目（按难度递进）', MARGIN.left, doc.y, { width: CONTENT_WIDTH })
   doc.moveDown(0.4)
 
@@ -549,7 +678,8 @@ export function renderDrillPdf(input: DrillRenderInput, options: RenderOptions):
     doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
     doc.text(`${index + 1}.`, MARGIN.left, startY, { width: labelWidth, lineBreak: false })
 
-    let cursorY = flowMath(doc, normalizeExponents(variation.stem), MARGIN.left + labelWidth, startY, CONTENT_WIDTH - labelWidth - 46, {
+    const badge = variation.topic ? `［${variation.topic}］` : ''
+    let cursorY = flowMath(doc, normalizeExponents(badge + variation.stem), MARGIN.left + labelWidth, startY, CONTENT_WIDTH - labelWidth - 46, {
       size: BODY_SIZE,
     })
 
@@ -757,8 +887,9 @@ export function renderLessonPdf(input: LessonRenderInput, options: RenderOptions
   return done
 }
 
-function normalizeType(type: string): 'choice' | 'fill' | 'solve' {
+function normalizeType(type: string): 'choice' | 'multi' | 'fill' | 'solve' {
   if (type === 'choice') return 'choice'
+  if (type === 'multi') return 'multi'
   if (type === 'fill') return 'fill'
   return 'solve'
 }

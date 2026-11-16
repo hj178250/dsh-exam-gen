@@ -1,9 +1,16 @@
-# dsh-exam-gen bundle layer — applied when a profile lists this bundle
+# dsh-exam-gen bundle layer - applied when a profile lists this bundle
 # (package.json declares `dsh.bundle.patch` pointing at this file).
 #
 # PITFALL: `name` is a PACKAGE NAME (resolved through the profile's node_modules
 # or the installation fallback `$DSH_HOME/profiles/node_modules`), NOT a
-# relative path. `dsh-exam-gen` is this package's main entry (→ dist/index.js).
+# relative path. `dsh-exam-gen` is this package's main entry (-> dist/index.js).
+#
+# `dsh-tool-cards` is a hard dependency of this package, so installing dsh-exam-gen
+# always brings it in. Activating it here means the user does not have to install a
+# second package by hand. If the user already installed it from the plugin page,
+# cordis de-duplicates by id and will not load it twice.
 - insert:
     - id: dsh-exam-gen
       name: dsh-exam-gen
+    - id: tool-cards
+      name: dsh-tool-cards
