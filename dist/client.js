@@ -1102,8 +1102,14 @@
         if (kind === 'aboutclose') { mark(e); setShowAbout(false); return }
       }
 
+      // pointerdown 与 mousedown 在 Chromium 里成对触发，去重防拖拽双启动。
+      var lastDownAt = 0
+
       function onDownCapture(e) {
         if (e.button !== undefined && e.button !== 0) return
+        var now = Date.now()
+        if (e.type === 'pointerdown') lastDownAt = now
+        else if (now - lastDownAt < 150) return
         var t = e.target
         if (!t || !t.closest) return
         var mini = t.closest('[data-eg="mini"]')
@@ -1126,20 +1132,27 @@
           setCardPos({ x: nx, y: ny })
         }
         function onUp() {
-          window.removeEventListener('mousemove', onMove, true)
-          window.removeEventListener('mouseup', onUp, true)
+          off('pointermove', onMove); off('mousemove', onMove)
+          off('pointerup', onUp); off('mouseup', onUp)
           if (mini && !moved) { setCollapsed(false); return }
           if (moved) writePos(posLiveRef.current.x, posLiveRef.current.y)
         }
-        window.addEventListener('mousemove', onMove, true)
-        window.addEventListener('mouseup', onUp, true)
+        // 拖动全程用 capture 监听：拖动中会重渲染（节点被替换），
+        // 监听器挂在 window 上才不受影响。
+        on('pointermove', onMove); on('mousemove', onMove)
+        on('pointerup', onUp); on('mouseup', onUp)
       }
 
-      window.addEventListener('click', onClickCapture, true)
-      window.addEventListener('mousedown', onDownCapture, true)
+      function on(type, fn) { window.addEventListener(type, fn, true) }
+      function off(type, fn) { window.removeEventListener(type, fn, true) }
+
+      on('click', onClickCapture)
+      on('pointerdown', onDownCapture)
+      on('mousedown', onDownCapture)
       return function () {
-        window.removeEventListener('click', onClickCapture, true)
-        window.removeEventListener('mousedown', onDownCapture, true)
+        off('click', onClickCapture)
+        off('pointerdown', onDownCapture)
+        off('mousedown', onDownCapture)
       }
     }, [])
 
