@@ -40,9 +40,9 @@ function activeDir() {
     const persistent = join(dshHome(), 'exam-gen-bank', 'bank.json');
     return existsSync(persistent) ? join(dshHome(), 'exam-gen-bank') : join(packageRoot(), 'data');
 }
-/** 当前题库索引（懒加载，进程内缓存）。 */
+/** 当前题库索引（懒加载，进程内缓存）。持久库与随包原始库合并加载（原始库打底，持久库去重叠加）。 */
 export async function getBank() {
-    return loadBank(activeDir());
+    return loadBank(activeDir(), [join(packageRoot(), 'data')]);
 }
 /**
  * 检索参考题。命中规则见 bank.searchBank：学科一致 + 年级加分 + 章节/知识点命中 + 难度接近，

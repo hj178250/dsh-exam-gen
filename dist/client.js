@@ -265,11 +265,11 @@
       '.exam-param .eg-submit:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(99,102,241,.34)}',
 
       '.exam-side-mini{position:fixed;z-index:2147483000;width:44px;height:44px;border-radius:50%;',
-      '  cursor:pointer;color:var(--dsw-alias-brand-primary,#6366f1);display:flex;align-items:center;justify-content:center;padding:0}',
-      '.exam-side-mini svg{display:block}',
+      '  cursor:pointer;color:var(--dsw-alias-brand-primary,#6366f1);display:flex;align-items:center;justify-content:center;padding:0;',
       '  border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.22));',
       '  background:color-mix(in srgb, var(--dsw-alias-bg-base, var(--eg-host-bg, #fff)) 90%, transparent);',
       '  box-shadow:0 6px 18px rgba(0,0,0,.12);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}',
+      '.exam-side-mini svg{display:block}',
     ].join('\n')
     var el = document.createElement('style')
     el.id = STYLE_ID
@@ -1061,6 +1061,9 @@
       var target = e && e.target
       if (target && (target.closest('.info') || target.closest('.min') || target.closest('.back'))) return
       if (e.button !== undefined && e.button !== 0) return
+      // 防宿主拦截：DSH 输入框 overlay 有全局 pointerdown/click 处理器，可能吃掉后续事件。
+      try { e.stopPropagation() } catch (err) {}
+      try { e.preventDefault() } catch (err) {}
       var startX = e.clientX, startY = e.clientY
       var orig = posRef.current
       function onMove(ev) {
@@ -1088,22 +1091,29 @@
     }
 
     var card
+    // 所有交互按钮/标题统一 stopPropagation，防官方 slot 宿主的全局 pointer 处理器吃掉事件。
+    var guard = function (fn) {
+      return function (e) {
+        try { e.stopPropagation() } catch (err) {}
+        return fn(e)
+      }
+    }
     if (collapsed) {
       card = R.createElement(
         'button', { className: 'exam-side-mini', style: posStyle, title: '展开出题助手',
-          onMouseDown: beginDrag,
-          onClick: function () { setCollapsed(false) } }, svgIcon(R, 'sparkles', 20)
+          onMouseDown: guard(beginDrag),
+          onClick: guard(function () { setCollapsed(false) }) }, svgIcon(R, 'sparkles', 20)
       )
     } else if (feature) {
       // 参数面板
       card = R.createElement(
         'div', { className: 'exam-side-card', style: posStyle },
         R.createElement(
-          'div', { className: 'exam-side-title', onMouseDown: beginDrag },
-          R.createElement('button', { className: 'back', title: '返回功能列表', onClick: function () { setActiveFeature('') } }, svgIcon(R, 'arrow-left', 14)),
+          'div', { className: 'exam-side-title', onMouseDown: guard(beginDrag) },
+          R.createElement('button', { className: 'back', title: '返回功能列表', onClick: guard(function () { setActiveFeature('') }) }, svgIcon(R, 'arrow-left', 14)),
           R.createElement('span', { className: 'badge', style: { color: feature.deep || 'var(--eg-brand)' } }, svgIcon(R, feature.ico, 14)),
           R.createElement('span', null, feature.label),
-          R.createElement('button', { className: 'min', title: '收起', onClick: function () { setActiveFeature(''); setCollapsed(true) } }, svgIcon(R, 'minus', 14))
+          R.createElement('button', { className: 'min', title: '收起', onClick: guard(function () { setActiveFeature(''); setCollapsed(true) }) }, svgIcon(R, 'minus', 14))
         ),
         R.createElement(ParamPanel, {
           feature: feature.key,
@@ -1122,15 +1132,15 @@
       card = R.createElement(
         'div', { className: 'exam-side-card' + (showAbout ? ' is-about' : ''), style: posStyle },
         R.createElement(
-          'div', { className: 'exam-side-title', onMouseDown: beginDrag },
+          'div', { className: 'exam-side-title', onMouseDown: guard(beginDrag) },
           R.createElement('span', { className: 'badge', style: { color: 'var(--eg-brand)' } }, svgIcon(R, 'sparkles', 14)),
           R.createElement('span', null, '出题助手'),
           R.createElement('button', {
             className: 'info' + (showAbout ? ' on' : ''),
             title: showAbout ? '收起介绍' : '使用说明 / 设置',
-            onClick: function () { setShowAbout(!showAbout) },
+            onClick: guard(function () { setShowAbout(!showAbout) }),
           }, svgIcon(R, 'info', 14)),
-          R.createElement('button', { className: 'min', title: '收起', onClick: function () { setCollapsed(true) } }, svgIcon(R, 'minus', 14))
+          R.createElement('button', { className: 'min', title: '收起', onClick: guard(function () { setCollapsed(true) }) }, svgIcon(R, 'minus', 14))
         ),
         about,
         (props && props.features ? props.features : []).map(function (f) {
@@ -1138,10 +1148,10 @@
           return R.createElement(
             'button', {
               key: f.key, className: 'exam-side-btn', title: f.desc,
-              onClick: function () {
+              onClick: guard(function () {
                 if (isTip) { setTipKey(''); setActiveFeature(f.key) }
                 else { setTipKey(f.key) }
-              },
+              }),
             },
             R.createElement('span', { className: 'ico', style: { background: f.tint, color: f.deep || 'var(--eg-brand)' } }, svgIcon(R, f.ico, 16)),
             R.createElement('span', { className: 'lbl' },

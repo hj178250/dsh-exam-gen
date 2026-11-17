@@ -81,30 +81,56 @@ async function readBankFile(file: string): Promise<BankItem[]> {
 /**
  * 加载题库。优先 <dir>/bank.json，回退 <dir>/quiz-seed.json。
  * 结果按 dir+mtime 缓存，换库或改库自动失效。
+ * 合并策略（关键）：持久库（用户回写/自改的题）与随包原始库**合并加载**——
+ * 旧逻辑持久库存在就完全顶掉原始库，导致用户早期只有 43 道题时，
+ * 3000+ 道的原始种子库永远读不到（物理/化学题库直出全空、全部走慢速模型）。
  */
-export async function loadBank(dir: string): Promise<BankIndex> {
+export async function loadBank(dir: string, extraDirs?: string[]): Promise<BankIndex> {
+  const files: string[] = []
+  for (const d of extraDirs ?? []) {
+    const ef = join(d, 'bank.json')
+    const el = join(d, 'quiz-seed.json')
+    if (existsSync(ef)) files.push(ef)
+    else if (existsSync(el)) files.push(el)
+  }
   const bankFile = join(dir, 'bank.json')
   const legacyFile = join(dir, 'quiz-seed.json')
   const file = existsSync(bankFile) ? bankFile : existsSync(legacyFile) ? legacyFile : ''
-  if (!file) {
+  if (file) files.push(file)
+  if (files.length === 0) {
     return { items: [], bySubject: new Map(), chapters: new Map(), size: 0 }
   }
   // 缓存 key 必须含 mtime+size：写回题库后文件变了要自动重载，否则「无感回写」的题永远进不了内存索引。
   let stamp = ''
-  try {
-    const st = statSync(file)
-    stamp = `${st.mtimeMs}:${st.size}`
-  } catch {
-    stamp = ''
+  for (const f of files) {
+    try {
+      const st = statSync(f)
+      stamp += `${st.mtimeMs}:${st.size};`
+    } catch {
+      stamp += '0:0;'
+    }
   }
-  const key = `${file}|${stamp}`
+  const key = files.join('|') + `|${stamp}`
   if (cached && cachedKey === key) return cached
 
-  let items: BankItem[] = []
-  try {
-    items = await readBankFile(file)
-  } catch {
-    items = []
+  const seen = new Set<string>()
+  const items: BankItem[] = []
+  for (const f of files) {
+    let batch: BankItem[] = []
+    try {
+      batch = await readBankFile(f)
+    } catch {
+      batch = []
+    }
+    for (const item of batch) {
+      if (!item?.content) continue
+      // 去重：同一道题以先加载的库为准（extraDirs 里的原始库先进，持久库后进覆盖不了）
+      const id = item.id ?? ''
+      const dedup = id ? `${id}` : ''
+      if (dedup && seen.has(dedup)) continue
+      if (dedup) seen.add(dedup)
+      items.push(item)
+    }
   }
   // 题库里的 LaTeX 在这里一次性转成纯文本：聊天窗口不会渲成碎行，pdf 那边还能把 1/2 排成上下结构
   for (const item of items) {
@@ -193,7 +219,7 @@ export function searchBank(index: BankIndex, query: BankQuery): BankItem[] {
     const score = scoreItem(item, query, wanted)
     if (score > 0) scored.push({ item, score })
   }
-  scored.sort((left, right) => right.score - left.score || left.item.id.localeCompare(right.item.id))
+  scored.sort((left, right) => right.score - left.score || String(left.item.id ?? '').localeCompare(String(right.item.id ?? '')))
   return scored.slice(0, limit).map((row) => row.item)
 }
 
