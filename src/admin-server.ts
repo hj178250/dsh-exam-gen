@@ -15,7 +15,7 @@ import { recomputeSummary } from './bank-store.js'
 import type { BankItem } from './bank.js'
 import { getPdf } from './pdf-store.js'
 import { CATALOG, EDITIONS, listEditions, listGrades, listBooksForEdition, listChaptersForEdition, listPointsForEdition } from './knowledge-catalog.js'
-import { dshHome, seedDir } from './retrieve.js'
+import { dshHome } from './retrieve.js'
 import { bankFilePath, ensureBankSeeded, mutateBank, normKey, persistentBankPath, readBankObj, type BankRead } from './bank-write.js'
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024
@@ -168,15 +168,15 @@ function persistentFile(): string {
   return persistentBankPath(dshHome())
 }
 
-/** 随包 seed 数据源路径（仅首次 seed 用）。 */
-function seedFile(): string {
-  return bankFilePath(seedDir())
+/** 随包 seed 数据源路径（仅首次 seed 用），由 deps.dir 传入（index.ts 传的是 seedDir()）。 */
+function seedFile(deps: AdminDeps): string {
+  return bankFilePath(deps.dir)
 }
 
 /** 读取持久库（首次访问自动从随包库 seed 一份，之后读到的都是持久库内容）。 */
-async function loadPersistent(): Promise<BankRead> {
+async function loadPersistent(deps: AdminDeps): Promise<BankRead> {
   const file = persistentFile()
-  await ensureBankSeeded(seedFile(), file)
+  await ensureBankSeeded(seedFile(deps), file)
   return readBankObj(file)
 }
 
@@ -248,7 +248,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
       handler: async (req, res) => {
         // 同源即可：侧栏面板靠它读「开/关」状态
         if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
-        const read = await loadPersistent()
+        const read = await loadPersistent(deps)
         const summary = recomputeSummary(read.items)
         return sendJson(res, 200, {
           ok: true,
@@ -318,7 +318,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         const params = queryOf(req)
         const limit = Math.min(200, Math.max(1, Number(params.get('limit') ?? 50) || 50))
         const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0)
-        const read = await loadPersistent()
+        const read = await loadPersistent(deps)
         const matched = filterItems(read.items, params)
         return sendJson(res, 200, {
           ok: true,
@@ -350,7 +350,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         if (!key) return sendJson(res, 400, { ok: false, error: '题干为空' })
 
         try {
-          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+          const result = await mutateBank(persistentFile(), seedFile(deps), (read) => {
             if (read.items.some((item) => normKey(item.content) === key)) {
               return { skipped: true, id: undefined as string | undefined, size: read.items.length }
             }
@@ -391,7 +391,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         if (!id) return sendJson(res, 400, { ok: false, error: '缺少 id' })
 
         try {
-          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+          const result = await mutateBank(persistentFile(), seedFile(deps), (read) => {
             const index = read.items.findIndex((item) => item.id === id)
             if (index < 0) return { ok: false, size: read.items.length }
             const { id: _ignored, ...fields } = draft
@@ -421,7 +421,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         const body = (await readJsonBody(req).catch(() => ({}))) as { id?: string }
         if (!body?.id) return sendJson(res, 400, { ok: false, error: '缺少 id' })
         try {
-          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+          const result = await mutateBank(persistentFile(), seedFile(deps), (read) => {
             const index = read.items.findIndex((item) => item.id === body.id)
             if (index < 0) return { ok: false, size: read.items.length }
             read.items.splice(index, 1)
@@ -459,7 +459,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         if (incoming.length > 500) return sendJson(res, 400, { ok: false, error: '单次最多导入 500 道' })
 
         try {
-          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+          const result = await mutateBank(persistentFile(), seedFile(deps), (read) => {
             const seen = new Set(read.items.map((item) => normKey(item.content)))
             let added = 0
             let skipped = 0
@@ -496,7 +496,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
       path: `${apiBase}/export`,
       handler: async (req, res) => {
         if (!sameOrigin(req) || !tokenOk(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
-        const read = await loadPersistent()
+        const read = await loadPersistent(deps)
         const stamp = new Date().toISOString().slice(0, 10)
         const payload = JSON.stringify(read.obj, null, 2)
         return sendText(res, 200, payload, `exam-bank-${stamp}.json`)

@@ -182,7 +182,7 @@ dialog::backdrop{background:rgba(0,0,0,.55)}
 
 <script>
 const TOKEN = ${JSON.stringify(token)};
-const state = { page: 1, size: 50, total: 0, keyword: '', subject: '', grade: '', chapter: '', type: '', difficulty: '' };
+const state = { page: 1, size: 50, total: 0, keyword: '', subject: '', grade: '', chapter: '', type: '', difficulty: '', items: [] };
 const $ = (id) => document.getElementById(id);
 const rows = $('rows');
 const _chapters = new Set();
@@ -232,7 +232,8 @@ async function loadList(){
   });
   const d = await api('/exam-bank/api/items?' + p.toString());
   state.total = d.total || 0;
-  rows.innerHTML = (d.items || []).map((it, i) => {
+  state.items = d.items || [];
+  rows.innerHTML = state.items.map((it, i) => {
     const no = (state.page - 1) * state.size + i + 1;
     const src = it.source === 'custom' ? ' <span class="tag src">手工</span>' : it.source === 'generated' ? ' <span class="tag src">生成</span>' : '';
     const ops = '<button class="link" data-edit="' + esc(it.id) + '">改</button>'
@@ -257,23 +258,25 @@ $('prev').onclick = () => { if (state.page > 1) { state.page -= 1; loadList().ca
 $('next').onclick = () => { state.page += 1; loadList().catch((e) => flash($('msg'), e.message, false)); };
 $('size').onchange = () => { state.size = Number($('size').value); state.page = 1; loadList().catch((e) => flash($('msg'), e.message, false)); };
 
-function itemById(id){
-  const tr = [...rows.children].find((r) => r.querySelector('[data-edit="' + id + '"]') || r.querySelector('[data-del="' + id + '"]'));
-  return tr ? { tr } : null;
-}
-
-async function openEdit(id){
-  // 从当前列表的题干里取不到完整字段，直接重新拉一遍目标页第一行之外的不可行；
-  // 这里用一个轻量 fetch：带 keyword 过滤到单条不可靠，所以按当前列表缓存恢复。
-  // 为了简单，编辑弹窗预填只做「题干/答案」，其余留空表示不修改。
-  const tr = itemById(id);
-  const cells = tr ? tr.tr.children : null;
-  const content = cells ? cells[6].textContent.replace(/\s*手工\s*|\s*生成\s*$/, '') : '';
-  const answer = cells ? cells[7].textContent : '';
-  $('form-edit').reset();
-  $('form-edit').querySelector('[name=id]').value = id;
-  $('form-edit').querySelector('[name=content]').value = content;
-  $('form-edit').querySelector('[name=answer]').value = answer;
+function openEdit(id){
+  const it = state.items.find((x) => x.id === id);
+  if (!it) { flash($('edit-msg'), '找不到这道题，请刷新后重试', false); $('dlg-edit').showModal(); return; }
+  const f = $('form-edit');
+  f.reset();
+  const set = (name, value) => { const el = f.querySelector('[name=' + name + ']'); if (el) el.value = value ?? ''; };
+  set('id', it.id);
+  set('grade', it.grade || '');
+  set('subject', it.subject || '');
+  set('chapter', it.chapter || '');
+  set('topic', it.topic || '');
+  set('difficulty', it.difficulty || '');
+  set('type', it.type || '');
+  set('content', it.content || '');
+  set('options', Array.isArray(it.options) ? it.options.join('\\n') : '');
+  set('answer', it.answer || '');
+  set('answerText', it.answerText || '');
+  set('explanation', it.explanation || '');
+  $('fe-options').style.display = (it.type === 'choice') ? '' : 'none';
   $('edit-msg').className = 'msg';
   $('dlg-edit').showModal();
 }
