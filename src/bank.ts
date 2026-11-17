@@ -6,7 +6,7 @@
 //    因为题目描述依赖配图的题在纯文本生成里没法用。
 // 3. 所有对外结构都是纯数据，方便单测（不依赖 ctx）。
 import { readFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { stripLatex, stripLatexList } from './latex.js'
 
@@ -89,7 +89,15 @@ export async function loadBank(dir: string): Promise<BankIndex> {
   if (!file) {
     return { items: [], bySubject: new Map(), chapters: new Map(), size: 0 }
   }
-  const key = `${file}`
+  // 缓存 key 必须含 mtime+size：写回题库后文件变了要自动重载，否则「无感回写」的题永远进不了内存索引。
+  let stamp = ''
+  try {
+    const st = statSync(file)
+    stamp = `${st.mtimeMs}:${st.size}`
+  } catch {
+    stamp = ''
+  }
+  const key = `${file}|${stamp}`
   if (cached && cachedKey === key) return cached
 
   let items: BankItem[] = []

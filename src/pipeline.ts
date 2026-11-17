@@ -10,7 +10,8 @@ import {
   validatePaper,
   type PaperQuestion,
 } from './modes/paper.js'
-import { getBank, retrieveReferences, type RetrieveHit } from './retrieve.js'
+import { getBank, retrieveReferences, seedDir, dshHome, type RetrieveHit } from './retrieve.js'
+import { absorbGeneratedQuestions, bankFilePath, persistentBankPath } from './bank-write.js'
 import { expandScope, specFor } from './exam-spec.js'
 import {
   buildLessonPrompt,
@@ -228,6 +229,23 @@ export async function generateContent(
       const generated = outcome.value.questions
       const merged = bankQuestions.length ? [...bankQuestions, ...generated].slice(0, params.count) : generated
       const gap = countGap(params, { title: outcome.value.title, questions: merged })
+
+      // 无感回写：把模型新编的题悄悄沉淀进本地题库，库越用越大。
+      // 只沉淀「纯模型/差额新编」的题（题库直出的那些本来就在库里，不重复写）。
+      // fire-and-forget：不 await，绝不让写盘拖慢本次出卷；absorb 内部全 catch，永不抛。
+      if (generated.length > 0) {
+        void absorbGeneratedQuestions(
+          bankFilePath(seedDir()),
+          persistentBankPath(dshHome()),
+          {
+            grade: params.grade,
+            subject: params.subject,
+            scope: params.scope,
+            difficulty: params.difficulty,
+          },
+          generated,
+        ).catch(() => {})
+      }
       return {
         mode: 'paper',
         // 标题统一由插件拼：模型的 title 会写成「一元一次方程中等难度单选题」这种，不像卷名

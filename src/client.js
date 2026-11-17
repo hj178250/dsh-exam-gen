@@ -23,9 +23,13 @@
   var STYLE_ID = 'exam-gen-style'
   var STATE_EVENT = 'exam-gen:state-change'
   var OPEN_SETTINGS_EVENT = 'exam-gen:open-settings'
+  var FALLBACK_MOUNT_ID = 'exam-gen-standalone-root'
 
   var ReactLib = null
   var ReactDOM = null
+  // 契约探测：DSH 更新可能改掉内部 API，这里记录哪些还可用，决定走官方 slot 还是 DOM 兜底。
+  var CAP = { react: false, reactdom: false, slots: false, standalone: false }
+  var healTimer = null
 
   var GRADE_ORDER = ['初一', '初二', '初三', '高一', '高二', '高三']
   var EDITION_ORDER = ['人教版', '北师大版', '沪教版', '华师大版', '苏教版']
@@ -327,7 +331,8 @@
 
   /* ---------------- 侧栏入口（DOM 方案，仅作开关） ---------------- */
 
-  var ANCHOR_TEXTS = ['插件', '自动化任务', '更多']
+  // 侧栏锚点文案：DSH 每次改版文案可能变，多备几个候选，找不到也不崩（只是没有左侧开关，右侧圆标仍可用）。
+  var ANCHOR_TEXTS = ['插件', '自动化任务', '更多', '扩展', '工具', 'Extensions', 'Plugins']
 
   function findAnchor() {
     var nodes = document.querySelectorAll('a,button,div,li,span')
@@ -913,7 +918,70 @@
     return card
   }
 
+  var hostCtx = null
+
+  /**
+   * standalone 兜底：当 DSH 更新改了 slots 契约（slot 名、register 签名、overlay 焦点）
+   * 导致官方 slot 不再渲染时，自己建一个 root 挂到 body，保证 UI 不消失。
+   */
+  function mountStandalone() {
+    if (!CAP.react || !CAP.reactdom) return false
+    if (!hostCtx) return false
+    try {
+      var root = document.getElementById(FALLBACK_MOUNT_ID)
+      if (!root) {
+        root = document.createElement('div')
+        root.id = FALLBACK_MOUNT_ID
+        document.body.appendChild(root)
+      }
+      var R = ReactLib
+      var features = FEATURES.map(function (f) {
+        return { key: f.key, label: f.label, desc: f.desc, ico: f.ico, tint: f.tint, explain: f.explain }
+      })
+      var tree = R.createElement(SideCard, {
+        features: features,
+        onPick: function (key, brief) {
+          // standalone 下拿不到 sessionId：尽力从 sessions 服务取当前会话，取不到走输入框兜底。
+          var sessions = hostCtx && hostCtx.sessions
+          var sid = ''
+          try {
+            if (sessions && typeof sessions.currentSessionId === 'function') sid = sessions.currentSessionId()
+            else if (sessions && typeof sessions.current === 'function') sid = sessions.current()
+          } catch (e) {}
+          sendPrompt(hostCtx, sid, brief)
+        },
+      })
+      if (typeof ReactDOM.createRoot === 'function') {
+        if (!root._egRoot) root._egRoot = ReactDOM.createRoot(root)
+        root._egRoot.render(tree)
+      } else if (typeof ReactDOM.render === 'function') {
+        ReactDOM.render(tree, root)
+      } else {
+        return false
+      }
+      CAP.standalone = true
+      return true
+    } catch (e) {
+      CAP.standalone = false
+      return false
+    }
+  }
+
+  /** 健康探针：开启后若官方 slot 没渲染出卡片，启用 standalone。
+   *  一旦进入 standalone 就保持到 DSH 重启（slot 契约是启动期决定的，运行期不会自己恢复；
+   *  重启会清空页面并重新 apply，那时会重新尝试官方 slot）。这样避免自抖动。 */
+  function heal() {
+    if (!state.enabled) return
+    if (document.getElementById(FALLBACK_MOUNT_ID)) return // 已兜底，别动
+    var native = document.querySelector('.exam-side-card, .exam-side-mini')
+    if (!native) mountStandalone()
+  }
+
   function registerQuickBar(ctx) {
+    hostCtx = ctx
+    try {
+      CAP.slots = !!(ctx && typeof ctx.inject === 'function')
+    } catch (e) { CAP.slots = false }
     ctx.inject(['slots', 'sessions'], function (scope) {
       scope.slots.inject('conversation.input.overlay', function () {
         return scope.slots.register(
@@ -968,18 +1036,65 @@
     try {
       registerQuickBar(ctx)
     } catch (e) {
-      try { console.warn('[dsh-exam-gen] quick bar register failed:', e) } catch (e2) {}
+      // DSH 更新改了 slot 契约：订阅失败也别让插件白屏，直接上 standalone 兜底。
+      try { console.warn('[dsh-exam-gen] slot register failed, using standalone:', e) } catch (e2) {}
+      mountStandalone()
     }
+
+    // 周期性自愈：DSH 更新后官方 slot 契约变了 → 自动切 standalone；原生恢复 → 自动撤兜底。
+    // 只在插件开启时检查，间隔 3s，开销可忽略。
+    if (healTimer) clearInterval(healTimer)
+    healTimer = setInterval(heal, 3000)
   }
 
-  window.__ModuleLoader__.load({
-    id: PLUGIN_ID,
-    factory: function (require) {
-      try { ReactLib = require('react') } catch (e) { ReactLib = null }
-      try { ReactDOM = require('react-dom') } catch (e) { ReactDOM = null }
-      var module = { exports: {} }
-      module.exports = { apply: apply, inject: ['sessions'] }
-      return module.exports
-    },
-  })
+  /** 尽力加载 React：DSH 更新后可能改了可 require 的模块名或改成全局暴露。 */
+  function loadReact(require) {
+    // React —— 依次试 require('react')、window.React
+    if (!ReactLib) {
+      try { ReactLib = require('react') } catch (e) {}
+      if (!ReactLib && typeof window !== 'undefined' && window.React) ReactLib = window.React
+      if (ReactLib && ReactLib.default && !ReactLib.createElement) ReactLib = ReactLib.default
+    }
+    // ReactDOM —— require('react-dom')、react-dom/client、window.ReactDOM
+    function hasDomApi(o) { return !!(o && (o.render || o.createRoot)) }
+    if (!hasDomApi(ReactDOM)) {
+      var rd = null
+      try { rd = require('react-dom') } catch (e) {}
+      if (hasDomApi(rd)) ReactDOM = rd
+    }
+    if (!hasDomApi(ReactDOM)) {
+      var rdc = null
+      try { rdc = require('react-dom/client') } catch (e) {}
+      if (hasDomApi(rdc)) ReactDOM = rdc
+    }
+    if (!hasDomApi(ReactDOM) && typeof window !== 'undefined' && window.ReactDOM) ReactDOM = window.ReactDOM
+    if (ReactDOM && ReactDOM.default && hasDomApi(ReactDOM.default)) ReactDOM = ReactDOM.default
+    CAP.react = !!(ReactLib && ReactLib.createElement && ReactLib.useState && ReactLib.useEffect)
+    CAP.reactdom = !!(ReactDOM && (ReactDOM.render || ReactDOM.createRoot))
+  }
+
+  function register() {
+    var loader = window.__ModuleLoader__
+    if (!loader || typeof loader.load !== 'function') return false
+    try {
+      loader.load({
+        id: PLUGIN_ID,
+        factory: function (require) {
+          try { loadReact(require) } catch (e) { CAP.react = false; CAP.reactdom = false }
+          var module = { exports: {} }
+          module.exports = { apply: apply, inject: ['sessions'] }
+          return module.exports
+        },
+      })
+      return true
+    } catch (e) { return false }
+  }
+
+  // DSH 更新时加载器可能晚于 client bundle 就绪：等几个 tick 再注册，别一次性失败就放弃。
+  var regTries = 0
+  function registerWhenReady() {
+    if (register()) return
+    if (++regTries < 40) setTimeout(registerWhenReady, 250)
+  }
+  registerWhenReady()
 })()
