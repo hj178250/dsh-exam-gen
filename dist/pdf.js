@@ -16,7 +16,11 @@ import { stripLatex } from './latex.js';
 function normalizeText(text, subject) {
     // 兜底剥 LaTeX：题库加载时已 stripLatex，但直接调用 renderPaperPdf 的路径（脚本/外部数据）
     // 可能仍带字面 \sqrt{3}/\frac{1}{2}，先剥一遍再走上下标/化学式归一。
-    return subject === '化学' ? normalizeChem(stripLatex(text)) : normalizeExponents(stripLatex(text));
+    const stripped = stripLatex(text);
+    // 宋体没有 U+2212（数学负号）/U+2013（en dash）的可视字形——量宽正常但画出来是空白，
+    // 数学式里的负号会整个消失（[−√3, √3] → [ √3, √3]）。统一换成 ASCII '-'（宋体渲染可靠）。
+    const unified = stripped.replace(/[\u2212\u2012\u2013]/g, '-');
+    return subject === '化学' ? normalizeChem(unified) : normalizeExponents(unified);
 }
 /**
  * 把上标/下标标记解析成 run，交给 drawRuns 用小字号 + Y 偏移真实排版。
@@ -472,14 +476,17 @@ function drawToken(doc, token, x, y, size, hasFrac = true, subject) {
         // 先量内层宽度（临时画不可取，用 drawRuns 的宽度语义重算）
         const innerWidth = runsWidth(doc, innerRuns, small);
         const radixWidth = doc.widthOfString('√');
-        const width = radixWidth * 0.72 + innerWidth + 2;
-        // 根号钩子略上提，让它看起来勾住内容；顶横线从钩子延伸到内容末端。
-        const radY = y - size * 0.18;
+        const width = radixWidth * 0.72 + innerWidth + 1.2;
+        // √ 字形与同行文字同 y 画（不再上提）：宋体 √ 字形整体偏矮、悬在行盒中部，
+        // 上提会让字形和横线、内层数字三层脱节（横线悬空的根因）。
+        const radY = y;
         doc.text('√', x, radY, { lineBreak: false });
-        const overlineY = radY - small * 0.62;
+        // 横线贴着 √ 字形顶部：字形实际顶部 ≈ radY - 0.3，横线只抬高 0.06*small（≈0.5pt）
+        // 压住内层数字——抬太多会整条悬空（首版 small*0.62 的教训）。
+        const overlineY = radY - small * 0.06;
         doc.save();
         doc.lineWidth(0.7).strokeColor('#111');
-        doc.moveTo(x + radixWidth * 0.5, overlineY);
+        doc.moveTo(x + radixWidth * 0.52, overlineY);
         doc.lineTo(x + width, overlineY);
         doc.stroke();
         doc.restore();
