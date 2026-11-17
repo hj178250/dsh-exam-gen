@@ -50,18 +50,41 @@
     return DEFAULT_COUNT[(grade || '') + '|' + (subject || '')] || 10
   }
 
+  /* Lucide 单色线性图标（lucide-icons/lucide, ISC License）——24x24 stroke=2,
+   * 24x24 stroke=2，currentColor 跟随文字色，替代 emoji 彩色大块。 */
+  var ICONS = {
+    'file-text': ['M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z', 'M14 2v5a1 1 0 0 0 1 1h5', 'M10 9H8', 'M16 13H8', 'M16 17H8'],
+    'target': [['circle', { cx: 12, cy: 12, r: 10 }], ['circle', { cx: 12, cy: 12, r: 6 }], ['circle', { cx: 12, cy: 12, r: 2 }]],
+    'book-open': ['M12 5v16', 'M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z'],
+    'network': [['rect', { x: 16, y: 16, width: 6, height: 6, rx: 1 }], ['rect', { x: 2, y: 16, width: 6, height: 6, rx: 1 }], ['rect', { x: 9, y: 2, width: 6, height: 6, rx: 1 }], 'M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3', 'M12 12V8'],
+    'layers': ['M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z', 'M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12', 'M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17'],
+    'copy-plus': [['line', { x1: 15, x2: 15, y1: 12, y2: 18 }], ['line', { x1: 12, x2: 18, y1: 15, y2: 15 }], ['rect', { width: 14, height: 14, x: 8, y: 8, rx: 2 }], 'M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2'],
+    'sparkles': ['M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z', 'M20 2v4', 'M22 4h-4', ['circle', { cx: 4, cy: 20, r: 2 }]],
+    'arrow-left': ['M12 19V5', 'm5 12 7 7 7-7'],
+    'minus': ['M5 12h14'],
+    'info': [['circle', { cx: 12, cy: 12, r: 10 }], 'M12 16v-4', 'M12 8h.01'],
+  }
+  function svgIcon(R, name, size) {
+    var parts = ICONS[name] || []
+    var kids = parts.map(function (p, i) {
+      if (Array.isArray(p)) { var a = { key: i, fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }; for (var k in p[1]) a[k] = p[1][k]; return R.createElement(p[0], a) }
+      return R.createElement('path', { key: i, d: p, fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' })
+    })
+    return R.createElement('svg', { viewBox: '0 0 24 24', width: size || 24, height: size || 24, fill: 'none', 'aria-hidden': true }, kids)
+  }
+
   var FEATURES = [
-    { key: 'paper',  label: '智能组卷', desc: '出一整张卷子',       ico: '📝', tint: 'rgba(99,102,241,.12)',
+    { key: 'paper',  label: '智能组卷', desc: '出一整张卷子',       ico: 'file-text', tint: 'rgba(99,102,241,.12)', deep: '#6366f1',
       explain: '按真实中/高考卷面规格组卷：选择、多选、填空、解答四板块，题号连排、分值逐题写死。' },
-    { key: 'drill',  label: '专项突破', desc: '一个知识点练透',     ico: '🎯', tint: 'rgba(239,68,68,.11)',
+    { key: 'drill',  label: '专项突破', desc: '一个知识点练透',     ico: 'target', tint: 'rgba(239,68,68,.11)', deep: '#ef4444',
       explain: '锁定单个知识点，出同题型的递进变式，附「这题变在哪」和解题方法小结。' },
-    { key: 'lesson', label: '教学讲义', desc: '例题 + 练习 + 解析',  ico: '📖', tint: 'rgba(16,185,129,.12)',
+    { key: 'lesson', label: '教学讲义', desc: '例题 + 练习 + 解析',  ico: 'book-open', tint: 'rgba(16,185,129,.12)', deep: '#10b981',
       explain: '三段式讲义：概念讲解 → 例题精讲 → 变式练习，适合上课直接用。' },
-    { key: 'graph',  label: '知识图谱', desc: '章节覆盖度树',       ico: '🌳', tint: 'rgba(139,92,246,.12)',
+    { key: 'graph',  label: '知识图谱', desc: '章节覆盖度树',       ico: 'network', tint: 'rgba(139,92,246,.12)', deep: '#8b5cf6',
       explain: '按学科→年级→册→章→知识点梳理层级树，标出每个知识点常见题型。' },
-    { key: 'sync',   label: '教材同步', desc: '基础 / 提高两区',     ico: '📚', tint: 'rgba(245,158,11,.13)',
+    { key: 'sync',   label: '教材同步', desc: '基础 / 提高两区',     ico: 'layers', tint: 'rgba(245,158,11,.13)', deep: '#f59e0b',
       explain: '按人教版/北师大版等教材版本与章节出同步题，分基础、提高两区，附掌握度勾选。' },
-    { key: 'mimic',  label: '拖拽模仿', desc: '文档 1:1 改题出卷',   ico: '📄', tint: 'rgba(20,184,166,.12)',
+    { key: 'mimic',  label: '拖拽模仿', desc: '文档 1:1 改题出卷',   ico: 'copy-plus', tint: 'rgba(20,184,166,.12)', deep: '#14b8a6',
       explain: '把试卷/题目文档拖进来，识别题目结构后 1:1 还原题型、题量、小问结构，只改数字与情境。' },
   ]
 
@@ -121,7 +144,8 @@
       '.exam-side-title .badge{width:23px;height:23px;border-radius:7px;flex:none;',
       '  background:color-mix(in srgb, var(--eg-brand) 16%, transparent);',
       '  color:var(--eg-brand);border:1px solid rgba(99,102,241,.20);',
-      '  display:flex;align-items:center;justify-content:center;font-size:13px}',
+      '  display:flex;align-items:center;justify-content:center}',
+      '.exam-side-title .badge svg{display:block}',
       '.exam-side-title .info,.exam-side-title .min,.exam-side-title .back{flex:none;width:22px;height:22px;border:0;border-radius:6px;cursor:pointer;',
       '  background:transparent;color:var(--eg-fg3);font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;',
       '  transition:background .16s ease,color .16s ease}',
@@ -135,7 +159,8 @@
       '  transition:background .18s ease,color .18s ease,transform .18s ease}',
       '.exam-side-btn:hover{background:color-mix(in srgb, var(--eg-brand) 10%, transparent);',
       '  color:var(--eg-brand);transform:translateX(2px)}',
-      '.exam-side-btn .ico{width:27px;height:27px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px}',
+      '.exam-side-btn .ico{width:27px;height:27px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center}',
+      '.exam-side-btn .ico svg{display:block}',
       '.exam-side-btn .lbl{display:flex;flex-direction:column;line-height:1.25}',
       '.exam-side-btn .lbl b{font-weight:600}',
       '.exam-side-btn .lbl small{font-size:10px;color:var(--eg-fg3);font-weight:400}',
@@ -206,7 +231,7 @@
       '  transition:border-color .16s ease,background .16s ease}',
       '.eg-mimic-zone.dragging{border-color:var(--eg-brand);',
       '  background:color-mix(in srgb, var(--eg-brand) 13%, transparent)}',
-      '.eg-mimic-zone-ico{font-size:22px;line-height:1}',
+      '.eg-mimic-zone-ico{line-height:1;color:var(--eg-brand);display:flex;justify-content:center}',
       '.eg-mimic-zone-title{font-size:12px;font-weight:650;color:var(--eg-fg)}',
       '.eg-mimic-zone-sub{font-size:10px;color:var(--eg-fg3)}',
       '.eg-mimic-zone-has{font-size:10px;color:var(--eg-brand);font-weight:600;margin-top:2px}',
@@ -240,7 +265,8 @@
       '.exam-param .eg-submit:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(99,102,241,.34)}',
 
       '.exam-side-mini{position:fixed;z-index:2147483000;width:44px;height:44px;border-radius:50%;',
-      '  cursor:pointer;font-size:18px;color:var(--dsw-alias-brand-primary,#6366f1);',
+      '  cursor:pointer;color:var(--dsw-alias-brand-primary,#6366f1);display:flex;align-items:center;justify-content:center;padding:0}',
+      '.exam-side-mini svg{display:block}',
       '  border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.22));',
       '  background:color-mix(in srgb, var(--dsw-alias-bg-base, var(--eg-host-bg, #fff)) 90%, transparent);',
       '  box-shadow:0 6px 18px rgba(0,0,0,.12);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}',
@@ -512,17 +538,21 @@
 
     if (featureKey === 'drill') {
       return '做一份' + subject + '专项突破练习。年级：' + grades + '。范围：' + range +
-        '。题量：' + p.count + '道。难度：' + diff + '。题型：' + typeLabel(p.types) + '。答案：' + ans + '。'
+        '。题量：' + p.count + '道。难度：' + diff + '。题型：' + typeLabel(p.types) +
+        '。变式：' + (p.variation || '基础变式') + '。答案：' + ans + '。'
     }
     if (featureKey === 'lesson') {
-      return '写一份' + subject + '教学讲义。年级：' + grades + '。范围：' + range + '。难度：' + diff + '。'
+      return '写一份' + subject + '教学讲义。年级：' + grades + '。范围：' + range +
+        '。难度：' + diff + '。侧重：' + (p.focus || '讲解为主') + '。例题：' + (p.lessonCount || 3) + '道。'
     }
     if (featureKey === 'graph') {
-      return '梳理' + subject + '知识图谱。年级：' + grades + '。范围：' + range + '。'
+      return '梳理' + subject + '知识图谱。年级：' + grades + '。范围：' + range +
+        '。' + (p.graphFormulas ? '带公式' : '不含公式') + '、' + (p.graphFreq ? '标注考频' : '不标考频') + '。'
     }
     if (featureKey === 'sync') {
       return '出一份' + subject + '教材同步练习。年级：' + grades + '。版本：' + p.textbook +
-        '。范围：' + range + '。题量：' + p.count + '道。难度：' + diff + '。答案：' + ans + '。'
+        '。范围：' + range + '。题量：' + p.count + '道。难度：' + diff +
+        '。配比：' + (p.ratio || '均衡') + '。答案：' + ans + '。'
     }
     if (featureKey === 'mimic') {
       var doc = (p.sourceText || '').trim()
@@ -682,6 +712,14 @@
     var ty = useState('mixed'); var types = ty[0]; var setTypes = ty[1]
     var an = useState(true); var withAnswer = an[0]; var setWithAnswer = an[1]
 
+    // —— 功能专属字段（五个功能各有不一样的参数）——
+    var vr = useState('基础变式'); var variation = vr[0]; var setVariation = vr[1] // drill 专属
+    var fc = useState('讲解为主'); var focus = fc[0]; var setFocus = fc[1] // lesson 专属
+    var lc = useState(3); var lessonCount = lc[0]; var setLessonCount = lc[1] // lesson 专属：例题数
+    var gf = useState(true); var graphFormulas = gf[0]; var setGraphFormulas = gf[1] // graph 专属
+    var gq = useState(true); var graphFreq = gq[0]; var setGraphFreq = gq[1] // graph 专属
+    var rt = useState('均衡'); var ratio = rt[0]; var setRatio = rt[1] // sync 专属（值不带数字，label 显示配比）
+
     // —— 拖拽模仿专用状态 ——
     var src = useState(''); var sourceText = src[0]; var setSourceText = src[1]
     var dr = useState(false); var dragging = dr[0]; var setDragging = dr[1]
@@ -765,6 +803,8 @@
         points: chosenPointNames(), count: count,
         difficulty: difficulty, types: types, withAnswer: withAnswer,
         sourceText: sourceText,
+        variation: variation, focus: focus, lessonCount: lessonCount,
+        graphFormulas: graphFormulas, graphFreq: graphFreq, ratio: ratio,
       })
       if (props.onClose) props.onClose()
       if (props.onSubmit) props.onSubmit(brief)
@@ -830,7 +870,7 @@
             ref: dropRef,
             className: 'eg-mimic-zone' + (dragging ? ' dragging' : ''),
           },
-            R.createElement('div', { className: 'eg-mimic-zone-ico' }, '📄'),
+            R.createElement('div', { className: 'eg-mimic-zone-ico' }, svgIcon(R, 'copy-plus', 22)),
             R.createElement('div', { className: 'eg-mimic-zone-title' }, dragging ? '松手读入文档' : '把试卷/题目文档拖到这里'),
             R.createElement('div', { className: 'eg-mimic-zone-sub' }, '支持 .txt / .md / .csv；PDF、Word 请粘贴文字'),
             sourceText
@@ -904,6 +944,50 @@
             { label: '混合', value: 'mixed' }, { label: '单选', value: 'choice' }, { label: '多选', value: 'multi' },
             { label: '填空', value: 'fill' }, { label: '解答', value: 'solve' },
           ], types, setTypes)
+        )
+      )
+    }
+    // —— 功能专属字段：五个功能的参数面板长得不一样 ——
+    if (featureKey === 'drill') {
+      children.push(
+        R.createElement('div', { className: 'eg-field' },
+          R.createElement('span', { className: 'eg-label' }, '变式类型'),
+          segControl(R, [
+            { label: '基础变式', value: '基础变式' }, { label: '综合变式', value: '综合变式' }, { label: '跨章变式', value: '跨章变式' },
+          ], variation, setVariation)
+        )
+      )
+    }
+    if (featureKey === 'lesson') {
+      children.push(
+        R.createElement('div', { className: 'eg-field' },
+          R.createElement('span', { className: 'eg-label' }, '讲练侧重'),
+          segControl(R, [
+            { label: '讲解为主', value: '讲解为主' }, { label: '讲练均衡', value: '讲练均衡' }, { label: '练习为主', value: '练习为主' },
+          ], focus, setFocus)
+        ),
+        sliderField(R, '例题数量', lessonCount, 0, 10, setLessonCount)
+      )
+    }
+    if (featureKey === 'graph') {
+      children.push(
+        R.createElement('div', { className: 'eg-field' },
+          R.createElement('span', { className: 'eg-label' }, '公式呈现'),
+          segControl(R, [{ label: '带公式', value: true }, { label: '不含公式', value: false }], graphFormulas, setGraphFormulas)
+        ),
+        R.createElement('div', { className: 'eg-field' },
+          R.createElement('span', { className: 'eg-label' }, '考频标注'),
+          segControl(R, [{ label: '标注考频', value: true }, { label: '不标注', value: false }], graphFreq, setGraphFreq)
+        )
+      )
+    }
+    if (featureKey === 'sync') {
+      children.push(
+        R.createElement('div', { className: 'eg-field' },
+          R.createElement('span', { className: 'eg-label' }, '基础：提高配比'),
+          segControl(R, [
+            { label: '基础 7:3', value: '基础为主' }, { label: '均衡 5:5', value: '均衡' }, { label: '提高 3:7', value: '提高为主' },
+          ], ratio, setRatio)
         )
       )
     }
@@ -1008,7 +1092,7 @@
       card = R.createElement(
         'button', { className: 'exam-side-mini', style: posStyle, title: '展开出题助手',
           onMouseDown: beginDrag,
-          onClick: function () { setCollapsed(false) } }, '✦'
+          onClick: function () { setCollapsed(false) } }, svgIcon(R, 'sparkles', 20)
       )
     } else if (feature) {
       // 参数面板
@@ -1016,10 +1100,10 @@
         'div', { className: 'exam-side-card', style: posStyle },
         R.createElement(
           'div', { className: 'exam-side-title', onMouseDown: beginDrag },
-          R.createElement('button', { className: 'back', title: '返回功能列表', onClick: function () { setActiveFeature('') } }, '←'),
-          R.createElement('span', { className: 'badge' }, feature.ico),
+          R.createElement('button', { className: 'back', title: '返回功能列表', onClick: function () { setActiveFeature('') } }, svgIcon(R, 'arrow-left', 14)),
+          R.createElement('span', { className: 'badge', style: { color: feature.deep || 'var(--eg-brand)' } }, svgIcon(R, feature.ico, 14)),
           R.createElement('span', null, feature.label),
-          R.createElement('button', { className: 'min', title: '收起', onClick: function () { setActiveFeature(''); setCollapsed(true) } }, '−')
+          R.createElement('button', { className: 'min', title: '收起', onClick: function () { setActiveFeature(''); setCollapsed(true) } }, svgIcon(R, 'minus', 14))
         ),
         R.createElement(ParamPanel, {
           feature: feature.key,
@@ -1039,14 +1123,14 @@
         'div', { className: 'exam-side-card' + (showAbout ? ' is-about' : ''), style: posStyle },
         R.createElement(
           'div', { className: 'exam-side-title', onMouseDown: beginDrag },
-          R.createElement('span', { className: 'badge' }, '✦'),
+          R.createElement('span', { className: 'badge', style: { color: 'var(--eg-brand)' } }, svgIcon(R, 'sparkles', 14)),
           R.createElement('span', null, '出题助手'),
           R.createElement('button', {
             className: 'info' + (showAbout ? ' on' : ''),
             title: showAbout ? '收起介绍' : '使用说明 / 设置',
             onClick: function () { setShowAbout(!showAbout) },
-          }, 'ⓘ'),
-          R.createElement('button', { className: 'min', title: '收起', onClick: function () { setCollapsed(true) } }, '−')
+          }, svgIcon(R, 'info', 14)),
+          R.createElement('button', { className: 'min', title: '收起', onClick: function () { setCollapsed(true) } }, svgIcon(R, 'minus', 14))
         ),
         about,
         (props && props.features ? props.features : []).map(function (f) {
@@ -1059,7 +1143,7 @@
                 else { setTipKey(f.key) }
               },
             },
-            R.createElement('span', { className: 'ico', style: { background: f.tint } }, f.ico),
+            R.createElement('span', { className: 'ico', style: { background: f.tint, color: f.deep || 'var(--eg-brand)' } }, svgIcon(R, f.ico, 16)),
             R.createElement('span', { className: 'lbl' },
               R.createElement('b', null, f.label),
               R.createElement('small', null, f.desc)
