@@ -45,7 +45,10 @@ import { buildDrill, renderDrillText } from './modes/drill.js'
 import { buildLesson, renderLessonText } from './modes/lesson.js'
 import { renderDrillPdf, renderLessonPdf } from './pdf.js'
 import { getBank } from './retrieve.js'
-import type { PaperQuestion } from './modes/paper.js'
+import type { PaperQuestion, PaperResult } from './modes/paper.js'
+import { validatePaper } from './modes/paper.js'
+import { mimicFromDocument } from './mimic.js'
+import { exportPaperFormats } from './export.js'
 import { seedDir } from './retrieve.js'
 import {
   listSubjects, listGrades, listBooks, listChapters, listPoints, findKnowledge, catalogStats,
@@ -412,6 +415,21 @@ export function apply(ctx: Context) {
               ? '题库补题 + 模型'
               : '模型生成'
         const who = outcome.meta?.model ? ` · ${outcome.meta.model}` : ''
+        lastPaper = {
+          title: outcome.title,
+          questions: outcome.questions,
+          meta: outcome.meta
+            ? {
+                label: outcome.meta.label,
+                minutes: outcome.meta.minutes,
+                totalPoints: outcome.meta.totalPoints,
+                difficulty: outcome.meta.difficulty,
+                grade: outcome.meta.grade,
+                subject: outcome.meta.subject,
+                scope: outcome.meta.scope,
+              }
+            : undefined,
+        }
         return {
           ok: true,
           text: body,
@@ -429,6 +447,8 @@ export function apply(ctx: Context) {
   registerKnowledgeCatalogTool(ctx)
   registerParamCard(ctx)
   registerCardPatch(ctx)
+  registerMimicTool(ctx)
+  registerExportTool(ctx)
   // exam_bank_add 不再注册成工具：它常驻约 477 token，而加题这件事题库管理页
   // （/exam-bank 的「新增题目」「导入 JSON」）已经能做，没必要让每轮对话都为它付费。
 
@@ -486,7 +506,7 @@ function checkCardPatch(): void {
 }
 
 function describe(ctx: Context): string {
-  return ['generate_content', 'exam_card_spec', 'exam_knowledge_catalog']
+  return ['generate_content', 'mimic_from_document', 'export_paper', 'exam_card_spec', 'exam_knowledge_catalog']
     .filter((toolName) => ctx.tools.get(toolName) !== undefined)
     .join(',')
 }
@@ -651,6 +671,9 @@ function renderPaperText(
  * 钩子补全 ui 时兜底用——单用户单轮场景足够可靠。
  */
 let pendingCardPreset: { mode: CardMode; preset: Record<string, unknown> } | null = null
+
+/** 最近一次生成的卷子，供 export_paper 不传 paper 对象时引用。 */
+let lastPaper: PaperResult | null = null
 
 /**
  * 知识点目录查询工具。
@@ -824,6 +847,199 @@ function registerParamCard(ctx: Context): void {
       } as Record<string, unknown>
       pendingCardPreset = { mode, preset }
       return { ok: true, call: cardCall(mode, preset) }
+    },
+  }))
+}
+
+/**
+ * 拖拽/粘贴文档 → 1:1 模仿出卷（m12189③）。
+ *
+ * 纯本地实现：不调模型、不检索题库。把拖进对话区的文档文本识别成 blueprint，
+ * 按 blueprint 1:1 还原题型/题量/小问结构，只改数字与情境，产出 PaperResult 并落 PDF。
+ */
+function registerMimicTool(ctx: Context): void {
+  ctx.tools.register(defineTool({
+    name: 'mimic_from_document',
+    description:
+      '把用户拖进/粘贴的试卷或题目文档 1:1 模仿成一张新卷：识别题号、题干、选项、答案与数字，' +
+      '保持题型、题量、小问结构不变，只改数字与情境，本地排版导出 PDF。' +
+      'sourceText 是文档全文（纯文本）；用户给的是 PDF/docx 读不出文字时，让用户把文字粘进对话。' +
+      'grade/subject/count/difficulty 可缺省（默认初一数学、按文档原题量）。',
+
+    parameters: {
+      type: 'object',
+      properties: {
+        sourceText: { type: 'string', description: '拖入/粘贴的文档全文（.txt/.md/.csv 或粘贴的试卷文字）。' },
+        grade: { type: 'string', description: '年级，如「初一」「高一」。缺省初一。' },
+        subject: { type: 'string', description: '学科，如「数学」「物理」。缺省数学。' },
+        count: { type: 'number', description: '出题数量；缺省按文档原题量 1:1 还原。' },
+        difficulty: { type: 'string', enum: ['基础', '中等', '拔高'], description: '难度。缺省中等。' },
+      },
+      required: ['sourceText'],
+      additionalProperties: false,
+    },
+
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean', description: '成功与否。' },
+          title: { type: 'string', description: '生成卷标题。' },
+          count: { type: 'number', description: '题目数量。' },
+          pdfUrl: { type: 'string', description: 'PDF 文件路径（已落盘并打开），空串表示没导出。' },
+          note: { type: 'string', description: '一句话备注（题型分布等）。' },
+        },
+        required: ['ok', 'title', 'count', 'pdfUrl', 'note'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => {
+        const data = value as { ok?: boolean; title?: string; count?: number; pdfUrl?: string; note?: string }
+        if (data.ok === false) return [{ type: 'text', text: '模仿出卷失败：' + (data.note || '请重试') }]
+        if (data.pdfUrl) {
+          return [{ type: 'text', text: `模仿卷已生成：\`${data.pdfUrl}\`\n\n${data.note ?? ''}\n\n题目、答案、解析都排版在 PDF 里，直接打开打印即可，不要再重列题目。` }]
+        }
+        return [{ type: 'text', text: `模仿卷「${data.title}」已生成（${data.count} 题），但 PDF 未导出。` }]
+      },
+    },
+
+    async execute(raw): Promise<{ ok: boolean; title: string; count: number; pdfUrl: string; note: string }> {
+      if (!runtimeEnabled) {
+        return { ok: false, title: '', count: 0, pdfUrl: '', note: '出题插件现在是关闭状态。' }
+      }
+      const sourceText = typeof raw.sourceText === 'string' ? raw.sourceText : ''
+      if (!sourceText.trim()) return { ok: false, title: '', count: 0, pdfUrl: '', note: 'sourceText 为空，请提供文档文本。' }
+      try {
+        const paper = mimicFromDocument(sourceText, {
+          grade: typeof raw.grade === 'string' && raw.grade.trim() ? raw.grade.trim() : undefined,
+          subject: typeof raw.subject === 'string' && raw.subject.trim() ? raw.subject.trim() : undefined,
+          count: typeof raw.count === 'number' && raw.count > 0 ? raw.count : undefined,
+          difficulty: raw.difficulty === '基础' || raw.difficulty === '拔高' ? raw.difficulty : '中等',
+        })
+        lastPaper = paper
+        let pdfUrl = ''
+        const origin = currentOrigin()
+        if (origin) {
+          const { buffer, pages } = await renderPaperPdf(paper, { withAnswer: true })
+          const saved = savePdf(`${paper.title}.pdf`.replace(/[\\/:*?"<>|]/g, '-'), buffer, origin, pages)
+          pdfUrl = saved.localPath || saved.url
+        }
+        return {
+          ok: true,
+          title: paper.title,
+          count: paper.questions.length,
+          pdfUrl,
+          note: `1:1 模仿 · ${paper.questions.length} 题 · ${paper.meta?.subject ?? ''}${paper.meta?.grade ?? ''} · 只改数字与情境`,
+        }
+      } catch (error) {
+        const message = error instanceof QuizError ? error.userMessage : '模仿出卷过程出错，请重试'
+        return { ok: false, title: '', count: 0, pdfUrl: '', note: message }
+      }
+    },
+  }))
+}
+
+/**
+ * 多格式导出：把最近一次生成的卷子（或直接传入的 paper JSON）导出成 PDF + HTML + Markdown。
+ * PDF 走现有 renderPaperPdf 落盘；HTML/Markdown 由 export.ts 纯本地渲染。
+ */
+function registerExportTool(ctx: Context): void {
+  ctx.tools.register(defineTool({
+    name: 'export_paper',
+    description:
+      '把最近一次生成的试卷导出成多格式：pdf / html / markdown（或 all 一次全出）。' +
+      '不传 paper 对象时引用最近一次 generate_content / mimic_from_document 生成的卷；' +
+      '拿不到历史卷时必须把 paper 对象作为 JSON 直接传进来（title + questions[{type,content,options,answer,points,analysis?}]）。' +
+      '返回各格式落盘路径，PDF 会自动打开。',
+
+    parameters: {
+      type: 'object',
+      properties: {
+        format: { type: 'string', enum: ['pdf', 'html', 'markdown', 'all'], description: '导出格式。缺省 all。' },
+        paper: {
+          type: 'object',
+          description: '可选，直接传入要导出的试卷对象；缺省引用最近一次生成的卷。',
+          properties: {
+            title: { type: 'string' },
+            questions: { type: 'array' },
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean', description: '成功与否。' },
+          title: { type: 'string', description: '导出卷标题。' },
+          files: { type: 'array', description: '导出文件的落盘路径列表。' },
+          note: { type: 'string', description: '一句话备注。' },
+        },
+        required: ['ok', 'title', 'files', 'note'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => {
+        const data = value as { ok?: boolean; title?: string; files?: string[]; note?: string }
+        if (data.ok === false) return [{ type: 'text', text: '导出失败：' + (data.note || '请重试') }]
+        const list = (data.files ?? []).map((f) => `\`${f}\``).join('\n') || '（无）'
+        return [{ type: 'text', text: `「${data.title}」已导出：\n${list}\n\n${data.note ?? ''}` }]
+      },
+    },
+
+    async execute(raw): Promise<{ ok: boolean; title: string; files: string[]; note: string }> {
+      if (!runtimeEnabled) {
+        return { ok: false, title: '', files: [], note: '出题插件现在是关闭状态。' }
+      }
+      const format = raw.format === 'pdf' || raw.format === 'html' || raw.format === 'markdown' ? raw.format : 'all'
+
+      let paper: PaperResult | null = null
+      if (raw.paper && typeof raw.paper === 'object') {
+        const candidate = { title: (raw.paper as { title?: string }).title ?? '试卷', questions: (raw.paper as { questions?: unknown }).questions }
+        const outcome = validatePaper(candidate, true)
+        paper = outcome.value
+      } else {
+        paper = lastPaper
+      }
+
+      if (!paper) return { ok: false, title: '', files: [], note: '没有可导出的试卷：先调 generate_content 或 mimic_from_document 生成一张，或直接把 paper 对象传进来。' }
+
+      try {
+        const files: string[] = []
+        const origin = currentOrigin() || ''
+        const safe = paper.title.replace(/[\\/:*?"<>|]/g, '-').slice(0, 60) || '试卷'
+
+        const writeLocal = (artifact: { fileName: string; buffer: Buffer }): string => {
+          try {
+            mkdirSync(PDF_OUT_DIR, { recursive: true })
+            const filePath = join(PDF_OUT_DIR, `${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}-${artifact.fileName}`)
+            writeFileSync(filePath, artifact.buffer)
+            return filePath
+          } catch {
+            return artifact.fileName
+          }
+        }
+
+        if (format === 'all') {
+          const bundle = await exportPaperFormats(paper, { title: safe })
+          const saved = savePdf(bundle.pdf.fileName, bundle.pdf.buffer, origin, bundle.pdf.pages ?? 1)
+          files.push(saved.localPath || saved.url)
+          files.push(writeLocal(bundle.html))
+          files.push(writeLocal(bundle.markdown))
+        } else if (format === 'pdf') {
+          const { buffer, pages } = await renderPaperPdf(paper, { withAnswer: true })
+          const saved = savePdf(`${safe}.pdf`, buffer, origin, pages)
+          files.push(saved.localPath || saved.url)
+        } else {
+          const bundle = await exportPaperFormats(paper, { title: safe })
+          if (format === 'html') files.push(writeLocal(bundle.html))
+          else files.push(writeLocal(bundle.markdown))
+        }
+        return { ok: true, title: paper.title, files, note: `已导出 ${files.length} 个文件 · ${format}` }
+      } catch (error) {
+        const message = error instanceof QuizError ? error.userMessage : '导出过程出错，请重试'
+        return { ok: false, title: '', files: [], note: message }
+      }
     },
   }))
 }

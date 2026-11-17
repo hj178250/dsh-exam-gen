@@ -46,6 +46,8 @@
       explain: '按学科→年级→册→章→知识点梳理层级树，标出每个知识点常见题型。' },
     { key: 'sync',   label: '教材同步', desc: '基础 / 提高两区',     ico: '📚', tint: 'rgba(245,158,11,.13)',
       explain: '按人教版/北师大版等教材版本与章节出同步题，分基础、提高两区，附掌握度勾选。' },
+    { key: 'mimic',  label: '拖拽模仿', desc: '文档 1:1 改题出卷',   ico: '📄', tint: 'rgba(20,184,166,.12)',
+      explain: '把试卷/题目文档拖进来，识别题目结构后 1:1 还原题型、题量、小问结构，只改数字与情境。' },
   ]
 
   var state = { enabled: false, busy: false, timer: null }
@@ -170,6 +172,24 @@
       '.eg-chk.on{border-color:var(--eg-brand);color:var(--eg-brand);background:color-mix(in srgb, var(--eg-brand) 8%, transparent)}',
       '.eg-range{width:100%;accent-color:#6366f1}',
       '.eg-hint{font-size:10px;color:var(--eg-fg3);line-height:1.5}',
+
+      // 拖拽模仿投放区
+      '.eg-mimic{display:flex;flex-direction:column;gap:6px}',
+      '.eg-mimic-zone{border:2px dashed color-mix(in srgb, var(--eg-brand) 45%, transparent);',
+      '  border-radius:11px;padding:13px 10px;display:flex;flex-direction:column;align-items:center;gap:3px;',
+      '  text-align:center;color:var(--eg-fg2);background:color-mix(in srgb, var(--eg-brand) 5%, transparent);',
+      '  transition:border-color .16s ease,background .16s ease}',
+      '.eg-mimic-zone.dragging{border-color:var(--eg-brand);',
+      '  background:color-mix(in srgb, var(--eg-brand) 13%, transparent)}',
+      '.eg-mimic-zone-ico{font-size:22px;line-height:1}',
+      '.eg-mimic-zone-title{font-size:12px;font-weight:650;color:var(--eg-fg)}',
+      '.eg-mimic-zone-sub{font-size:10px;color:var(--eg-fg3)}',
+      '.eg-mimic-zone-has{font-size:10px;color:var(--eg-brand);font-weight:600;margin-top:2px}',
+      '.exam-param .eg-textarea{width:100%;box-sizing:border-box;min-height:88px;resize:vertical;',
+      '  font-size:11px;line-height:1.55;color:var(--eg-fg);',
+      '  background:color-mix(in srgb, var(--eg-fg) 4%, transparent);border:1px solid var(--eg-line);',
+      '  border-radius:8px;padding:6px 8px;outline:none;font-family:inherit}',
+      '.exam-param .eg-textarea:focus{border-color:var(--eg-brand)}',
 
       // 知识点清单：章节选中后列出该章全部知识点 + 题型徽章（多选）
       '.eg-point-list{display:flex;flex-direction:column;gap:4px;max-height:190px;overflow:auto;',
@@ -479,6 +499,13 @@
       return '出一份' + subject + '教材同步练习。年级：' + grades + '。版本：' + p.textbook +
         '。范围：' + range + '。题量：' + p.count + '道。难度：' + diff + '。答案：' + ans + '。'
     }
+    if (featureKey === 'mimic') {
+      var doc = (p.sourceText || '').trim()
+      var docBlock = doc ? '\n\n【文档内容，作为 sourceText 原样传入工具】\n' + doc.slice(0, 12000) : ''
+      return '用「拖拽模仿」把下面文档 1:1 模仿成一张新卷，调用工具 mimic_from_document。' +
+        '年级：' + grades + '。学科：' + subject + '。难度：' + diff + '。' +
+        '要求：识别文档里的题号、题干、选项、答案与数字，保持题型、题量、小问结构不变，只改数字与情境。' + docBlock
+    }
     // paper（默认）
     return '出一套' + (stage ? stage : '') + subject + '试卷。年级：' + grades +
       '。范围：' + range + '。题量：' + p.count + '道。难度：' + diff +
@@ -499,7 +526,7 @@
         '用更少的 token，生成更高质量的题目',
         e('small', null, '把确定性工作交给本地，模型专注编题。参数卡纯本地渲染，点开即现。')
       ),
-      e('h5', null, '五个功能'),
+      e('h5', null, '六个功能'),
       e('ul', null, FEATURES.map(function (f) {
         return e('li', { key: f.key }, f.label + ' — ' + f.desc)
       })),
@@ -599,6 +626,7 @@
     var R = ReactLib
     var useState = R.useState
     var useEffect = R.useEffect
+    var useRef = R.useRef
 
     var featureKey = props.feature
 
@@ -617,6 +645,11 @@
     var df = useState('中等'); var difficulty = df[0]; var setDifficulty = df[1]
     var ty = useState('mixed'); var types = ty[0]; var setTypes = ty[1]
     var an = useState(true); var withAnswer = an[0]; var setWithAnswer = an[1]
+
+    // —— 拖拽模仿专用状态 ——
+    var src = useState(''); var sourceText = src[0]; var setSourceText = src[1]
+    var dr = useState(false); var dragging = dr[0]; var setDragging = dr[1]
+    var dz = useState(''); var dropZoneNote = dz[0]; var setDropZoneNote = dz[1]
 
     // —— 级联数据 ——
     var booksS = useState([]); var books = booksS[0]; var setBooks = booksS[1]
@@ -687,19 +720,98 @@
         book: book, chapter: chapter, point: point,
         points: chosenPointNames(), count: count,
         difficulty: difficulty, types: types, withAnswer: withAnswer,
+        sourceText: sourceText,
       })
       if (props.onClose) props.onClose()
       if (props.onSubmit) props.onSubmit(brief)
+    }
+
+    function readDroppedFile(file) {
+      // 只读文本：txt/md/csv 直接读；docx/pdf 的文本读不出来（FileReader 读二进制），
+      // 提示用户把文字粘贴进下方 textarea。其它文本类后缀也照读。
+      var name = (file && file.name) || ''
+      var ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
+      var okExt = { txt: 1, md: 1, csv: 1, text: 1, json: 1, markdown: 1 }
+      if (okExt[ext]) {
+        var reader = new FileReader()
+        reader.onload = function () {
+          var text = typeof reader.result === 'string' ? reader.result : ''
+          if (text) {
+            setSourceText(text)
+            setDropZoneNote('已读入 ' + name + '（' + text.length + ' 字）')
+          } else {
+            setDropZoneNote('文件为空，请粘贴文字。')
+          }
+        }
+        reader.onerror = function () {
+          setDropZoneNote('读取失败，请粘贴文字。')
+        }
+        reader.readAsText(file, 'utf-8')
+        return
+      }
+      setDropZoneNote('只支持 .txt/.md/.csv；「' + name + '」请把文字粘进下方文本框。')
     }
 
     var needRange = featureKey !== 'lesson' || true // 讲义也允许选范围
     var needCount = featureKey === 'paper' || featureKey === 'drill' || featureKey === 'sync'
     var needTypes = featureKey === 'paper' || featureKey === 'drill'
 
+    // 拖拽投放区 DOM ref：必须在原生 capture 阶段抢先 stopPropagation，
+    // 才能在 DSH 附件处理器（document 冒泡阶段 preventDefault）接管全页 drop 之前拦住事件。
+    var dropRef = useRef(null)
+    useEffect(function () {
+      if (featureKey !== 'mimic' || !dropRef.current) return
+      var el = dropRef.current
+      function over(e) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); setDragging(true) }
+      function leave() { setDragging(false) }
+      function drop(e) {
+        e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation()
+        setDragging(false)
+        var files = e.dataTransfer && e.dataTransfer.files
+        if (files && files.length) readDroppedFile(files[0])
+      }
+      el.addEventListener('dragover', over, true)
+      el.addEventListener('dragleave', leave, true)
+      el.addEventListener('drop', drop, true)
+      return function () {
+        el.removeEventListener('dragover', over, true)
+        el.removeEventListener('dragleave', leave, true)
+        el.removeEventListener('drop', drop, true)
+      }
+    })
+
+    var mimicDrop = featureKey === 'mimic'
+      ? R.createElement('div', { className: 'eg-mimic' },
+          R.createElement('div', {
+            ref: dropRef,
+            className: 'eg-mimic-zone' + (dragging ? ' dragging' : ''),
+          },
+            R.createElement('div', { className: 'eg-mimic-zone-ico' }, '📄'),
+            R.createElement('div', { className: 'eg-mimic-zone-title' }, dragging ? '松手读入文档' : '把试卷/题目文档拖到这里'),
+            R.createElement('div', { className: 'eg-mimic-zone-sub' }, '支持 .txt / .md / .csv；PDF、Word 请粘贴文字'),
+            sourceText
+              ? R.createElement('div', { className: 'eg-mimic-zone-has' }, '已载入 ' + sourceText.length + ' 字')
+              : null
+          ),
+          R.createElement('label', { className: 'eg-field' },
+            R.createElement('span', { className: 'eg-label' }, '或直接粘贴题目文字（无文档时）'),
+            R.createElement('textarea', {
+              className: 'eg-textarea', rows: 6, value: sourceText,
+              placeholder: '粘贴整张试卷或若干道题目……\n例如：\n1. 小明有 12 个苹果，吃了 5 个，还剩几个？\nA. 6  B. 7  C. 8  D. 9\n答案：B',
+              onChange: function (e) { setSourceText(e.target.value) },
+            })
+          ),
+          dropZoneNote
+            ? R.createElement('div', { className: 'eg-hint' }, dropZoneNote)
+            : null
+        )
+      : null
+
     var children = [
       props.explain
         ? R.createElement('div', { className: 'eg-explain' }, props.explain)
         : null,
+      mimicDrop,
       R.createElement('div', { className: 'eg-field' },
         R.createElement('span', { className: 'eg-label' }, '科目'),
         segControl(R, SUBJECT_ORDER.map(function (s) { return { label: s, value: s } }), subject, setSubject)

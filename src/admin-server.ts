@@ -1,15 +1,22 @@
-// 题库管理页的服务端：往 DSH 自己的 webServer 上挂 4 条路由。
+// 题库管理页的服务端：往 DSH 自己的 webServer 上挂路由。
 //
 // 借鉴 dsh-tool-cards 的接线方式（它是同一套 API 的现成例子）：
 //   ctx.inject(['webServer','connection'], () => webServer.register({ kind:'exact', path, handler }))
 // 这里必须用 ctx.inject 而不是 ctx.effect：webServer 服务晚于本插件激活时，
 // ctx.effect 里的 ctx.get('webServer') 会拿到 undefined，路由就永久丢了（dsh-tool-cards 0.2.2 踩过这个坑）。
+//
+// 关键约定（甲方需求 m12189②：用户可自己改题库）：
+// 所有写操作（add / update / delete / import）都落到持久库
+// `<DSH_HOME>/exam-gen-bank/bank.json`，绝不写随包只读的 `data/` 库。
+// 读写统一复用 bank-write.ts 的去重(normKey)、原子写、.bak 备份与串行写锁。
 import { randomBytes } from 'node:crypto'
 import { ADMIN_API, ADMIN_PATH, adminPageHtml, PDF_PATH } from './admin-page.js'
-import { appendItem, importItems, readBankFile, recomputeSummary, removeItem, toExportJson, bankPath, type ItemDraft } from './bank-store.js'
-import { loadBank, type BankItem } from './bank.js'
+import { recomputeSummary } from './bank-store.js'
+import type { BankItem } from './bank.js'
 import { getPdf } from './pdf-store.js'
 import { CATALOG, EDITIONS, listEditions, listGrades, listBooksForEdition, listChaptersForEdition, listPointsForEdition } from './knowledge-catalog.js'
+import { dshHome, seedDir } from './retrieve.js'
+import { bankFilePath, ensureBankSeeded, mutateBank, normKey, persistentBankPath, readBankObj, type BankRead } from './bank-write.js'
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024
 
@@ -119,31 +126,34 @@ function sendBinary(res: ResLike, status: number, buffer: Buffer, filename: stri
   res.end(buffer)
 }
 
-function queryOf(req: ReqLike): URLSearchParams {  const raw = req.url ?? '/'
+function queryOf(req: ReqLike): URLSearchParams {
+  const raw = req.url ?? '/'
   const index = raw.indexOf('?')
   return new URLSearchParams(index >= 0 ? raw.slice(index + 1) : '')
 }
 
-/** 内存过滤：题库 3340 条全表扫一遍不到 1 ms，不必建索引。 */
+/** 内存过滤：题库几千条全表扫一遍不到 1 ms，不必建索引。 */
 export function filterItems(items: BankItem[], params: URLSearchParams): BankItem[] {
-  const q = (params.get('q') ?? '').trim().toLowerCase()
   const subject = params.get('subject') ?? ''
-  const difficulty = params.get('difficulty') ?? ''
-  const source = params.get('source') ?? ''
+  const grade = params.get('grade') ?? ''
   const chapter = params.get('chapter') ?? ''
+  const type = params.get('type') ?? ''
+  const difficulty = params.get('difficulty') ?? ''
+  const keyword = (params.get('keyword') ?? params.get('q') ?? '').trim().toLowerCase()
   return items.filter((item) => {
     if (subject && item.subject !== subject) return false
-    if (difficulty && item.difficulty !== difficulty) return false
-    if (source && item.source !== source) return false
+    if (grade && item.grade !== grade) return false
     if (chapter && !(item.chapter ?? '').includes(chapter)) return false
-    if (!q) return true
-    const haystack = `${item.content ?? ''} ${item.chapter ?? ''} ${item.topic ?? ''} ${item.answerText ?? ''}`.toLowerCase()
-    return haystack.includes(q)
+    if (type && item.type !== type) return false
+    if (difficulty && item.difficulty !== difficulty) return false
+    if (!keyword) return true
+    const haystack = `${item.content ?? ''} ${item.chapter ?? ''} ${item.topic ?? ''} ${item.answerText ?? ''} ${item.answer ?? ''}`.toLowerCase()
+    return haystack.includes(keyword)
   })
 }
 
 export interface AdminDeps {
-  /** 题库目录（默认 <包根>/data）。 */
+  /** 题库目录（默认 <包根>/data，仅作为随包 seed 数据源，不再作为写目标）。 */
   dir: string
   /** 是否启用（DSH_EXAM_ADMIN=1 或配置项）。 */
   enabled: boolean
@@ -151,6 +161,28 @@ export interface AdminDeps {
   isOn?: () => boolean
   /** 切换插件开关，返回切换后的值。 */
   setOn?: (on: boolean) => boolean
+}
+
+/** 持久库路径（写目标），由 DSH_HOME 实时计算，不依赖 index.ts 传入的 seed dir。 */
+function persistentFile(): string {
+  return persistentBankPath(dshHome())
+}
+
+/** 随包 seed 数据源路径（仅首次 seed 用）。 */
+function seedFile(): string {
+  return bankFilePath(seedDir())
+}
+
+/** 读取持久库（首次访问自动从随包库 seed 一份，之后读到的都是持久库内容）。 */
+async function loadPersistent(): Promise<BankRead> {
+  const file = persistentFile()
+  await ensureBankSeeded(seedFile(), file)
+  return readBankObj(file)
+}
+
+/** 生成一条自定义题 id。 */
+function newCustomId(index = 0): string {
+  return `custom-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}${index ? `-${index}` : ''}`
 }
 
 /**
@@ -196,7 +228,6 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
       kind: 'exact',
       path: `${apiBase}/toggle`,
       handler: async (req, res) => {
-        // 同源即可：侧栏开关由页面自己发，页面上不一定带得到 token
         if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
         if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '需要 POST' })
         let body: { enabled?: boolean } | undefined
@@ -217,17 +248,16 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
       handler: async (req, res) => {
         // 同源即可：侧栏面板靠它读「开/关」状态
         if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
-        const file = bankPath(deps.dir)
-        const bank = await readBankFile(file)
-        const index = await loadBank(deps.dir)
+        const read = await loadPersistent()
+        const summary = recomputeSummary(read.items)
         return sendJson(res, 200, {
           ok: true,
           enabled: deps.isOn?.() !== false,
-          path: file,
-          size: bank.items.length,
-          summary: recomputeSummary(bank.items),
-          license: bank.license,
-          chapters: index.chapters.size,
+          path: read.file,
+          size: read.items.length,
+          summary,
+          license: read.obj.license,
+          chapters: summary.chapters,
         })
       },
     })
@@ -279,27 +309,28 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
       },
     })
 
+    // 列题目：query 过滤 subject/grade/chapter/type/difficulty/keyword + 分页 limit/offset。
     const itemsRoute = webServer.register({
       kind: 'exact',
       path: `${apiBase}/items`,
       handler: async (req, res) => {
         if (!sameOrigin(req) || !tokenOk(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
         const params = queryOf(req)
-        const page = Math.max(1, Number(params.get('page') ?? 1) || 1)
-        const size = Math.min(200, Math.max(1, Number(params.get('size') ?? 50) || 50))
-        const bank = await readBankFile(bankPath(deps.dir))
-        const matched = filterItems(bank.items, params)
-        const start = (page - 1) * size
+        const limit = Math.min(200, Math.max(1, Number(params.get('limit') ?? 50) || 50))
+        const offset = Math.max(0, Number(params.get('offset') ?? 0) || 0)
+        const read = await loadPersistent()
+        const matched = filterItems(read.items, params)
         return sendJson(res, 200, {
           ok: true,
           total: matched.length,
-          page,
-          size,
-          items: matched.slice(start, start + size),
+          limit,
+          offset,
+          items: matched.slice(offset, offset + limit),
         })
       },
     })
 
+    // 加题：body 为 BankItem（content 必填），写入持久库，去重（normKey），重复返回 skipped。
     const addRoute = webServer.register({
       kind: 'exact',
       path: `${apiBase}/add`,
@@ -312,13 +343,75 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         } catch (error) {
           return sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : '请求体无法解析' })
         }
-        const draft = (body ?? {}) as ItemDraft
-        const result = await appendItem(deps.dir, { ...draft, source: draft.source ?? 'custom' })
-        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.errors.join('；'), errors: result.errors })
-        return sendJson(res, 200, { ok: true, id: result.id, size: result.size })
+        const draft = (body ?? {}) as Partial<BankItem>
+        const content = String(draft.content ?? '').trim()
+        if (!content) return sendJson(res, 400, { ok: false, error: 'content 必填' })
+        const key = normKey(content)
+        if (!key) return sendJson(res, 400, { ok: false, error: '题干为空' })
+
+        try {
+          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+            if (read.items.some((item) => normKey(item.content) === key)) {
+              return { skipped: true, id: undefined as string | undefined, size: read.items.length }
+            }
+            const item: BankItem = {
+              ...(draft as BankItem),
+              id: draft.id || newCustomId(),
+              content,
+              source: draft.source ?? 'custom',
+            }
+            read.items.push(item)
+            read.obj.items = read.items
+            read.obj.summary = recomputeSummary(read.items)
+            return { skipped: false, id: item.id, size: read.items.length }
+          })
+          if (result.skipped) return sendJson(res, 200, { ok: true, skipped: true, size: result.size })
+          return sendJson(res, 200, { ok: true, skipped: false, id: result.id, size: result.size })
+        } catch (error) {
+          return sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : '写入失败' })
+        }
       },
     })
 
+    // 改题：body 含 id + 要改字段，按 id 定位合并（id 本身不可改）。
+    const updateRoute = webServer.register({
+      kind: 'exact',
+      path: `${apiBase}/update`,
+      handler: async (req, res) => {
+        if (!sameOrigin(req) || !tokenOk(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
+        if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '需要 POST' })
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch (error) {
+          return sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : '请求体无法解析' })
+        }
+        const draft = (body ?? {}) as Partial<BankItem> & { id?: string }
+        const id = String(draft.id ?? '')
+        if (!id) return sendJson(res, 400, { ok: false, error: '缺少 id' })
+
+        try {
+          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+            const index = read.items.findIndex((item) => item.id === id)
+            if (index < 0) return { ok: false, size: read.items.length }
+            const { id: _ignored, ...fields } = draft
+            const merged: BankItem = { ...read.items[index], ...(fields as Partial<BankItem>) }
+            merged.id = id
+            if (!String(merged.content ?? '').trim()) return { ok: false, size: read.items.length }
+            read.items[index] = merged
+            read.obj.items = read.items
+            read.obj.summary = recomputeSummary(read.items)
+            return { ok: true, size: read.items.length }
+          })
+          if (!result.ok) return sendJson(res, 400, { ok: false, error: '没有这道题或题干为空' })
+          return sendJson(res, 200, { ok: true, size: result.size })
+        } catch (error) {
+          return sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : '写入失败' })
+        }
+      },
+    })
+
+    // 删题：按 id 删除持久库条目（持久库属用户，允许删任意一条）。
     const deleteRoute = webServer.register({
       kind: 'exact',
       path: `${apiBase}/delete`,
@@ -327,12 +420,24 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: '需要 POST' })
         const body = (await readJsonBody(req).catch(() => ({}))) as { id?: string }
         if (!body?.id) return sendJson(res, 400, { ok: false, error: '缺少 id' })
-        const result = await removeItem(deps.dir, body.id)
-        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.errors.join('；') })
-        return sendJson(res, 200, { ok: true, size: result.size })
+        try {
+          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+            const index = read.items.findIndex((item) => item.id === body.id)
+            if (index < 0) return { ok: false, size: read.items.length }
+            read.items.splice(index, 1)
+            read.obj.items = read.items
+            read.obj.summary = recomputeSummary(read.items)
+            return { ok: true, size: read.items.length }
+          })
+          if (!result.ok) return sendJson(res, 400, { ok: false, error: '没有这道题' })
+          return sendJson(res, 200, { ok: true, size: result.size })
+        } catch (error) {
+          return sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : '写入失败' })
+        }
       },
     })
 
+    // 导入：body 为 JSON 数组或 {items:[]}，merge 进持久库（去重 + 原子写 + .bak）。
     const importRoute = webServer.register({
       kind: 'exact',
       path: `${apiBase}/import`,
@@ -345,23 +450,56 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
         } catch (error) {
           return sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : '请求体无法解析' })
         }
-        const items = (body as { items?: ItemDraft[] })?.items
-        if (!Array.isArray(items)) return sendJson(res, 400, { ok: false, error: 'items 必须是数组' })
-        const result = await importItems(deps.dir, items.map((item) => ({ ...item, source: item.source ?? 'custom' })))
-        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.errors.join('；'), errors: result.errors })
-        return sendJson(res, 200, { ok: true, size: result.size, evicted: result.evicted ?? 0 })
+        const incoming: unknown[] = Array.isArray(body)
+          ? body
+          : Array.isArray((body as { items?: unknown[] })?.items)
+            ? ((body as { items?: unknown[] }).items as unknown[])
+            : []
+        if (!incoming.length) return sendJson(res, 400, { ok: false, error: 'items 必须是数组且不能为空' })
+        if (incoming.length > 500) return sendJson(res, 400, { ok: false, error: '单次最多导入 500 道' })
+
+        try {
+          const result = await mutateBank(persistentFile(), seedFile(), (read) => {
+            const seen = new Set(read.items.map((item) => normKey(item.content)))
+            let added = 0
+            let skipped = 0
+            for (let i = 0; i < incoming.length; i += 1) {
+              const raw = incoming[i] as Partial<BankItem> | undefined
+              const content = String(raw?.content ?? '').trim()
+              if (!content) { skipped += 1; continue }
+              const key = normKey(content)
+              if (!key || seen.has(key)) { skipped += 1; continue }
+              seen.add(key)
+              const item: BankItem = {
+                ...(raw as BankItem),
+                id: raw?.id || newCustomId(i),
+                content,
+                source: raw?.source ?? 'custom',
+              }
+              read.items.push(item)
+              added += 1
+            }
+            read.obj.items = read.items
+            read.obj.summary = recomputeSummary(read.items)
+            return { added, skipped, size: read.items.length }
+          })
+          return sendJson(res, 200, { ok: true, added: result.added, skipped: result.skipped, size: result.size })
+        } catch (error) {
+          return sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : '写入失败' })
+        }
       },
     })
 
+    // 导出：下载当前持久库完整 JSON。
     const exportRoute = webServer.register({
       kind: 'exact',
       path: `${apiBase}/export`,
       handler: async (req, res) => {
         if (!sameOrigin(req) || !tokenOk(req)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
-        const bank = await readBankFile(bankPath(deps.dir))
-        const matched = filterItems(bank.items, queryOf(req))
+        const read = await loadPersistent()
         const stamp = new Date().toISOString().slice(0, 10)
-        return sendText(res, 200, toExportJson(matched), `exam-bank-${stamp}.json`)
+        const payload = JSON.stringify(read.obj, null, 2)
+        return sendText(res, 200, payload, `exam-bank-${stamp}.json`)
       },
     })
 
@@ -378,7 +516,7 @@ export function registerAdminPage(ctx: ContextLike, deps: AdminDeps): string | u
     })
 
     ctx.logger?.('dsh-exam-gen')?.info?.(`题库管理页：${ADMIN_PATH}`)
-    return [pageRoute, toggleRoute, statsRoute, catalogRoute, itemsRoute, addRoute, deleteRoute, importRoute, exportRoute, pdfRoute]
+    return [pageRoute, toggleRoute, statsRoute, catalogRoute, itemsRoute, addRoute, updateRoute, deleteRoute, importRoute, exportRoute, pdfRoute]
   })
 
   return ADMIN_PATH

@@ -8,10 +8,10 @@
 // 5. 低权重：回写的题 source='model-generated'，检索时不像 public-corpus 那样 +6，
 //    避免把真题锚挤下去；但仍然可被命中，实现「越用越懂你」。
 // 6. 写锁：模块内串行化，避免并发出卷同时写库互相覆盖。
-import { readFile, writeFile, rename, copyFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, rename, copyFile, mkdir, unlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import type { BankItem } from './bank.js'
 
 export interface GeneratedQuestionLike {
@@ -42,7 +42,7 @@ export interface WriteResult {
 }
 
 /** 归一化题干用于判重：去空白 + 常见标点。 */
-function normKey(text: string): string {
+export function normKey(text: string): string {
   return String(text || '')
     .replace(/\s+/g, '')
     .replace(/[，。；：、（）()【】\[\]{}"'“”‘’？?！!,，.。\-—_]/g, '')
@@ -158,6 +158,87 @@ export function absorbGeneratedQuestions(
   })
 }
 
+/** 持久题库文件的对象结构（兼容 data/bank.json 顶层字段）。 */
+export interface BankObject {
+  version?: number
+  kind?: string
+  license?: string
+  attribution?: string[]
+  summary?: Record<string, unknown>
+  items: BankItem[]
+}
+
+/** 读一个题库文件的归一化结果。 */
+export interface BankRead {
+  file: string
+  /** 文件是否存在（不存在时返回空对象，便于首次 seed）。 */
+  exists: boolean
+  /** 原始顶层是数组还是对象。写回时据此决定是否包一层。 */
+  isArray: boolean
+  /** 归一化后的完整对象（isArray=false 时保留原始顶层字段）。 */
+  obj: BankObject
+  /** 题目数组（obj.items 的引用）。 */
+  items: BankItem[]
+}
+
+/**
+ * 读取题库文件，兼容三种形态：数组、{items:[]}、以及不存在。
+ * 不存在时不抛错，返回空 items，方便调用方「首次写入自动 seed」。
+ */
+export async function readBankObj(file: string): Promise<BankRead> {
+  if (!existsSync(file)) {
+    const obj: BankObject = { items: [] }
+    return { file, exists: false, isArray: false, obj, items: obj.items }
+  }
+  const raw = JSON.parse(await readFile(file, 'utf8')) as unknown
+  const isArray = Array.isArray(raw)
+  if (isArray) {
+    const items = raw as BankItem[]
+    const obj: BankObject = { items }
+    return { file, exists: true, isArray: true, obj, items }
+  }
+  const parsed = raw as Partial<BankObject>
+  const items = Array.isArray(parsed.items) ? parsed.items : []
+  const obj: BankObject = { ...parsed, items }
+  return { file, exists: true, isArray: false, obj, items }
+}
+
+/**
+ * 原子写题库对象：先写 .tmp，再 rename；首次写前留 .bak 备份。
+ * 与 absorbGeneratedQuestions 共用同一套「临时文件 + rename + .bak」约定。
+ */
+export async function writeBankObjAtomic(file: string, obj: BankObject): Promise<void> {
+  await mkdir(dirname(file), { recursive: true })
+  const bak = `${file}.bak`
+  try {
+    if (existsSync(file) && !existsSync(bak)) await copyFile(file, bak)
+  } catch {
+    // 备份失败不影响写入
+  }
+  const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
+  try {
+    await writeFile(tmp, JSON.stringify(obj), 'utf8')
+    await rename(tmp, file)
+  } catch (error) {
+    if (existsSync(tmp)) {
+      try {
+        await unlink(tmp)
+      } catch {
+        // 清理失败不影响主流程
+      }
+    }
+    throw error
+  }
+}
+
+/** 读取一个目录里的题库条目（自动识别 bank.json / quiz-seed.json，不存在返回空数组）。 */
+export async function listBank(dir: string): Promise<BankItem[]> {
+  const file = existsSync(join(dir, 'bank.json')) ? join(dir, 'bank.json') : join(dir, 'quiz-seed.json')
+  if (!existsSync(file)) return []
+  const read = await readBankObj(file)
+  return read.items
+}
+
 /** 随包原始题库文件路径（seed 数据源）。 */
 export function bankFilePath(seedDir: string): string {
   const bank = join(seedDir, 'bank.json')
@@ -167,6 +248,42 @@ export function bankFilePath(seedDir: string): string {
 /** 持久题库文件路径（回写 / 用户改库的目标）。 */
 export function persistentBankPath(dshHome: string): string {
   return join(dshHome, 'exam-gen-bank', 'bank.json')
+}
+
+/**
+ * 首次访问持久库时，若不存在则从随包原始库 seed 一份过去。
+ * 走同一把写锁，避免和 absorbGeneratedQuestions / mutateBank 竞争。
+ */
+export async function ensureBankSeeded(seedFile: string, targetFile: string): Promise<void> {
+  await serialize(async () => {
+    if (existsSync(targetFile)) return
+    if (!seedFile || !existsSync(seedFile)) return
+    await mkdir(dirname(targetFile), { recursive: true })
+    await copyFile(seedFile, targetFile)
+  })
+}
+
+/**
+ * 串行化的「读 → 改 → 原子写回」事务，管理页的增删改导入都走这里。
+ * 与 absorbGeneratedQuestions 共用同一把写锁（serialize/writeChain），
+ * 避免「无感回写」和「用户手动改库」并发时互相覆盖。
+ * 首次写入前自动从 seedFile seed；首次写盘留 .bak。
+ */
+export async function mutateBank<T>(
+  targetFile: string,
+  seedFile: string | undefined,
+  mutate: (read: BankRead) => T | Promise<T>,
+): Promise<T> {
+  return serialize(async () => {
+    if (!existsSync(targetFile) && seedFile && existsSync(seedFile)) {
+      await mkdir(dirname(targetFile), { recursive: true })
+      await copyFile(seedFile, targetFile)
+    }
+    const read = await readBankObj(targetFile)
+    const result = await mutate(read)
+    await writeBankObjAtomic(targetFile, read.obj)
+    return result
+  })
 }
 
 export { dirname }
