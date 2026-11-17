@@ -11,11 +11,14 @@
  */
 import PDFDocument from 'pdfkit'
 import { splitMath, normalizeExponents, normalizeChem, parseMathRuns, type MathToken, type MathRun } from './math-text.js'
+import { stripLatex } from './latex.js'
 import type { PaperQuestion, PaperResult } from './modes/paper.js'
 
 /** 按学科选上标/下标处理：化学走 normalizeChem（化学式、离子电荷），其余走数学上标。 */
 function normalizeText(text: string, subject?: string): string {
-  return subject === '化学' ? normalizeChem(text) : normalizeExponents(text)
+  // 兜底剥 LaTeX：题库加载时已 stripLatex，但直接调用 renderPaperPdf 的路径（脚本/外部数据）
+  // 可能仍带字面 \sqrt{3}/\frac{1}{2}，先剥一遍再走上下标/化学式归一。
+  return subject === '化学' ? normalizeChem(stripLatex(text)) : normalizeExponents(stripLatex(text))
 }
 
 /**
@@ -228,7 +231,6 @@ function drawQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQu
   const labelWidth = 22
   ensureSpace(doc, 46)
   const startY = doc.y
-
   doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
   doc.text(`${number}.`, MARGIN.left, startY, { width: labelWidth, lineBreak: false })
 
@@ -240,7 +242,7 @@ function drawQuestion(doc: PDFKit.PDFDocument, number: number, question: PaperQu
 
   let cursorY = flowMath(doc, content, MARGIN.left + labelWidth, startY, CONTENT_WIDTH - labelWidth, {
     size: BODY_SIZE,
-  })
+  }, subject)
 
   const options = question.options ?? []
   if (options.length > 0) {
@@ -303,7 +305,7 @@ function drawOptions(doc: PDFKit.PDFDocument, options: string[], top: number, su
       const x = MARGIN.left + indent + j * columnWidth
       doc.font('song').fontSize(BODY_SIZE).fillColor('#111')
       doc.text(`${letter}.`, x, y, { width: 15, lineBreak: false })
-      flowMath(doc, normalizeText(option, subject), x + 15, y, columnWidth - 18, { size: BODY_SIZE })
+      flowMath(doc, normalizeText(option, subject), x + 15, y, columnWidth - 18, { size: BODY_SIZE }, subject)
     })
     y += rowHeight
   }
@@ -339,7 +341,7 @@ function drawAnswerPage(doc: PDFKit.PDFDocument, paper: PaperResult): void {
     if (question.analysis) parts.push(`解析：${normalizeText(question.analysis, paper.meta?.subject)}`)
 
     doc.font('song').fontSize(BODY_SIZE - 0.5).fillColor('#111')
-    const endY = flowMath(doc, parts.join('　'), MARGIN.left + 22, y, CONTENT_WIDTH - 22, { size: BODY_SIZE - 0.5 })
+    const endY = flowMath(doc, parts.join('　'), MARGIN.left + 22, y, CONTENT_WIDTH - 22, { size: BODY_SIZE - 0.5 }, paper.meta?.subject)
     doc.y = endY + 5
   })
 }
@@ -375,6 +377,7 @@ function flowMath(
   startY: number,
   maxWidth: number,
   style: { size: number },
+  subject?: string,
 ): number {
   const size = style.size
   const small = size * 0.86
@@ -391,7 +394,7 @@ function flowMath(
   const flush = (): void => {
     if (line.length === 0) return
     const hasFrac = line.some((entry) => entry.token.kind === 'frac')
-    for (const entry of line) drawToken(doc, entry.token, entry.x, y, size, hasFrac)
+    for (const entry of line) drawToken(doc, entry.token, entry.x, y, size, hasFrac, subject)
     y += hasFrac ? fracLine : normalLine
     line = []
   }
@@ -444,10 +447,26 @@ function tokenWidth(doc: PDFKit.PDFDocument, token: MathToken, size: number): nu
     doc.font('song').fontSize(size)
     return doc.widthOfString(token.text)
   }
+  if (token.kind === 'sqrt') {
+    doc.font('song').fontSize(size * 0.86)
+    const radix = doc.widthOfString('√') * 0.72
+    return radix + runsWidth(doc, parseMathRuns(token.text), size * 0.86) + 2
+  }
   doc.font('song').fontSize(size * 0.86)
   const num = doc.widthOfString(token.num)
   const den = doc.widthOfString(token.den)
   return Math.max(num, den) + 4
+}
+
+/** 量一组 MathRun 的总宽（与 drawRuns 同一字号规则，供根号/预量用）。 */
+function runsWidth(doc: PDFKit.PDFDocument, runs: MathRun[], size: number): number {
+  const SUP_RATIO = 0.62
+  let w = 0
+  for (const run of runs) {
+    doc.font('song').fontSize(run.kind === 'base' ? size : size * SUP_RATIO)
+    w += doc.widthOfString(run.text)
+  }
+  return w
 }
 
 function drawToken(
@@ -457,6 +476,7 @@ function drawToken(
   y: number,
   size: number,
   hasFrac = true,
+  subject?: string,
 ): void {
   if (token.kind === 'text') {
     // 上下标不能靠字体字形（宋体只剩 ¹²³），要拆成 run 用小字号+Y偏移真排版。
@@ -467,6 +487,31 @@ function drawToken(
   // 分数：分子在上、分母在下，基线对齐同行的普通文字。
   const small = size * 0.86
   doc.font('song').fontSize(small).fillColor('#111')
+
+  // 根号：宋体的 √ 字形只有小钩、没有盖住被开方数的上划线（vinculum），
+  // 直接印「√3」看起来就是横杠被擦掉了。这里手画：√ 字形 + 顶横线延伸盖住被开方数。
+  if (token.kind === 'sqrt') {
+    const inner = token.text
+    doc.font('song').fontSize(small).fillColor('#111')
+    const innerRuns = parseMathRuns(normalizeText(inner, subject))
+    // 先量内层宽度（临时画不可取，用 drawRuns 的宽度语义重算）
+    const innerWidth = runsWidth(doc, innerRuns, small)
+    const radixWidth = doc.widthOfString('√')
+    const width = radixWidth * 0.72 + innerWidth + 2
+    // 根号钩子略上提，让它看起来勾住内容；顶横线从钩子延伸到内容末端。
+    const radY = y - size * 0.18
+    doc.text('√', x, radY, { lineBreak: false })
+    const overlineY = radY - small * 0.62
+    doc.save()
+    doc.lineWidth(0.7).strokeColor('#111')
+    doc.moveTo(x + radixWidth * 0.5, overlineY)
+    doc.lineTo(x + width, overlineY)
+    doc.stroke()
+    doc.restore()
+    drawRuns(doc, innerRuns, x + radixWidth * 0.72, y, small)
+    return
+  }
+
   const numWidth = doc.widthOfString(token.num)
   const denWidth = doc.widthOfString(token.den)
   const width = Math.max(numWidth, denWidth) + 4

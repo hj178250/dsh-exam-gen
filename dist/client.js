@@ -35,6 +35,21 @@
   var EDITION_ORDER = ['人教版', '北师大版', '沪教版', '华师大版', '苏教版']
   var SUBJECT_ORDER = ['数学', '物理', '化学', '生物']
 
+  // 默认题量跟真实卷面规格走（甲方要求：高考数学就是 19 题，不要一律默认 10）。
+  // 与 src/exam-spec.ts 的卷面规格一致；未列出的组合退回保守默认。
+  var DEFAULT_COUNT = {
+    '高一|数学': 19, '高二|数学': 19, '高三|数学': 19,   // 新高考Ⅰ卷 19 题 150 分
+    '高一|化学': 18, '高二|化学': 18, '高三|化学': 18,   // 高考化学 18 题 100 分
+    '高一|物理': 17, '高二|物理': 17, '高三|物理': 17,   // 高考物理 17 题
+    '高一|生物': 22, '高二|生物': 22, '高三|生物': 22,   // 12+6+4
+    '初一|数学': 22, '初二|数学': 20, '初三|数学': 22,   // 中考风格 10+6+6
+    '初二|物理': 19, '初三|物理': 21,
+    '初三|化学': 20,
+  }
+  function defaultCount(grade, subject) {
+    return DEFAULT_COUNT[(grade || '') + '|' + (subject || '')] || 10
+  }
+
   var FEATURES = [
     { key: 'paper',  label: '智能组卷', desc: '出一整张卷子',       ico: '📝', tint: 'rgba(99,102,241,.12)',
       explain: '按真实中/高考卷面规格组卷：选择、多选、填空、解答四板块，题号连排、分值逐题写死。' },
@@ -142,6 +157,16 @@
       '.exam-about ul{margin:0;padding-left:15px}',
       '.exam-about li{margin:1px 0}',
       '.exam-about .flow span{color:var(--eg-brand);font-weight:600}',
+      '.exam-about .sw{display:flex;align-items:center;gap:10px;margin:12px 0 4px;padding:9px 10px;border-radius:9px;',
+      'background:var(--eg-brand-weak,rgba(59,130,246,.08));cursor:pointer;user-select:none;transition:background .15s}',
+      '.exam-about .sw:hover{background:var(--eg-brand-weak2,rgba(59,130,246,.14))}',
+      '.exam-about .sw .track{width:34px;height:19px;border-radius:10px;background:var(--eg-fg3,#9ca3af);position:relative;flex:none;transition:background .18s}',
+      '.exam-about .sw .track::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;',
+      'background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .18s}',
+      '.exam-about .sw.on .track{background:var(--eg-brand,#3b82f6)}',
+      '.exam-about .sw.on .track::after{left:17px}',
+      '.exam-about .sw .sw-label{font-size:11.5px;font-weight:600;color:var(--eg-fg)}',
+      '.exam-about .sw .sw-sub{font-size:10.5px;color:var(--eg-fg3);margin-left:auto}',
       '.exam-about-close{display:block;margin:10px 0 0 auto;border:0;cursor:pointer;background:transparent;',
       '  color:var(--eg-fg3);font-size:10.5px;padding:2px 4px;border-radius:5px;transition:color .16s ease}',
       '.exam-about-close:hover{color:var(--eg-brand)}',
@@ -514,14 +539,25 @@
 
   /* ---------------- 使用说明 / 设置面板 ---------------- */
 
-  function renderAbout(R, onClose) {
+  /** 设置面板顶部的主开关（甲方要求：能开也要能关）。props.enabled + props.onToggle 由 SideCard 提供。 */
+  function renderAbout(R, onClose, swProps) {
     var e = R.createElement
+    var enabled = !!(swProps && swProps.enabled)
     var flow = ['规则解析', '卷面规格', '题库锚定', '模型只编题', '本地校验', 'PDF 排版']
     var save = ['确定性工作下沉本地：排版/编号/校验/统计不耗模型 token',
                 '骨架注入：只给卷面骨架与约束，不喂大段范文',
                 '约束输出：结构化指令让模型只编题，减少废话往返',
                 '题库复用：锚定已有题目，避免重复生成']
     return e('div', { className: 'exam-about' },
+      e('div', {
+        className: 'sw' + (enabled ? ' on' : ''),
+        title: enabled ? '点击关闭出题插件（右侧面板与所有按钮立即隐藏）' : '点击启动出题插件',
+        onClick: function () { if (swProps && swProps.onToggle) swProps.onToggle() },
+      },
+        e('span', { className: 'track' }),
+        e('span', { className: 'sw-label' }, enabled ? '出题插件：已开启' : '出题插件：已关闭'),
+        e('span', { className: 'sw-sub' }, enabled ? '点这里关闭' : '点这里开启')
+      ),
       e('div', { className: 'exam-about-hero' },
         '用更少的 token，生成更高质量的题目',
         e('small', null, '把确定性工作交给本地，模型专注编题。参数卡纯本地渲染，点开即现。')
@@ -641,7 +677,7 @@
     var pt = useState(''); var point = pt[0]; var setPoint = pt[1]
     // 知识点清单多选（name -> true），带题型徽章
     var sp = useState({}); var selectedPoints = sp[0]; var setSelectedPoints = sp[1]
-    var cnt = useState(10); var count = cnt[0]; var setCount = cnt[1]
+    var cnt = useState(defaultCount('初一', '数学')); var count = cnt[0]; var setCount = cnt[1]
     var df = useState('中等'); var difficulty = df[0]; var setDifficulty = df[1]
     var ty = useState('mixed'); var types = ty[0]; var setTypes = ty[1]
     var an = useState(true); var withAnswer = an[0]; var setWithAnswer = an[1]
@@ -685,6 +721,14 @@
           setPoints((j && j.points) || [])
         })
     }
+
+    // 科目/年级变化 → 题量默认跟着卷面规格走（高考数学 19、化学 18……），用户手动调过就以用户为准。
+    var lastCountSource = useRef('init')
+    useEffect(function () {
+      if (lastCountSource.current === 'user') return
+      setCount(defaultCount(firstGrade || '初一', subject))
+    }, [subject, firstGrade])
+    function userSetCount(v) { lastCountSource.current = 'user'; setCount(v) }
 
     useEffect(function () { loadBooks() }, [subject, firstGrade, textbook, singleGrade])
     useEffect(function () { loadChapters() }, [book])
@@ -845,7 +889,7 @@
       )
     }
 
-    if (needCount) children.push(sliderField(R, '题量', count, 1, 30, setCount))
+    if (needCount) children.push(sliderField(R, '题量', count, 1, 30, userSetCount))
     children.push(
       R.createElement('div', { className: 'eg-field' },
         R.createElement('span', { className: 'eg-label' }, '难度'),
@@ -987,7 +1031,10 @@
         })
       )
     } else {
-      var about = showAbout ? renderAbout(R, function () { setShowAbout(false) }) : null
+      var about = showAbout ? renderAbout(R, function () { setShowAbout(false) }, {
+        enabled: enabled,
+        onToggle: function () { toggleEnabled() },
+      }) : null
       card = R.createElement(
         'div', { className: 'exam-side-card' + (showAbout ? ' is-about' : ''), style: posStyle },
         R.createElement(

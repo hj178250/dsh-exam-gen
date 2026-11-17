@@ -20,6 +20,7 @@
 export type MathToken =
   | { kind: 'text'; text: string }
   | { kind: 'frac'; num: string; den: string }
+  | { kind: 'sqrt'; text: string }
 
 /** 数字（可带小数点）。 */
 const NUM = '\\d+(?:\\.\\d+)?'
@@ -65,23 +66,49 @@ function acceptFrac(num: string, den: string, before: string, after: string): bo
   return true
 }
 
-/** 把字符串切成 text / frac 混合片段。 */
+/** 把字符串切成 text / frac / sqrt 混合片段。 */
 export function splitMath(input: string): MathToken[] {
   const tokens: MathToken[] = []
-  let cursor = 0
-  FRAC_RE.lastIndex = 0
-  for (let m = FRAC_RE.exec(input); m !== null; m = FRAC_RE.exec(input)) {
+  // 先认根号：√3、√(2x-1)、√x²、√21 —— 被开方数是 ATOM 或括号组。
+  // 放在分数识别之前：√(2x+1)/3 这种「根号分数」要整体当 sqrt 处理，避免 /3 被先吃成分母。
+  const SQRT_RE = new RegExp(
+    `√\\s*(?:${GROUP}|${ATOM})`,
+    'g',
+  )
+  const FRAC_RE2 = new RegExp(
+    `(?<![\\w.\\/\\\\√])(?<num>${SIDE})\\/(?<den>${SIDE})(?![\\w.\\/\\\\])`,
+    'g',
+  )
+  const hits: Array<{ start: number; end: number; token: MathToken }> = []
+  for (const m of input.matchAll(SQRT_RE)) {
+    const raw = m[0]
+    const inner = raw.replace(/^√\s*/, '')
+    hits.push({ start: m.index, end: m.index + raw.length, token: { kind: 'sqrt', text: inner } })
+  }
+  for (const m of input.matchAll(FRAC_RE2)) {
     const { num, den } = m.groups ?? {}
     if (!num || !den) continue
     const before = input.slice(Math.max(0, m.index - 4), m.index)
     const after = input.slice(m.index + m[0].length, m.index + m[0].length + 4)
     if (!acceptFrac(num, den, before, after)) continue
-    // 括号组作为分子/分母时，画的时候去掉外层括号（分式线本身就是分组）
     const numText = num.startsWith('(') && num.endsWith(')') ? num.slice(1, -1) : num
     const denText = den.startsWith('(') && den.endsWith(')') ? den.slice(1, -1) : den
-    if (m.index > cursor) tokens.push({ kind: 'text', text: input.slice(cursor, m.index) })
-    tokens.push({ kind: 'frac', num: numText, den: denText })
-    cursor = m.index + m[0].length
+    hits.push({ start: m.index, end: m.index + m[0].length, token: { kind: 'frac', num: numText, den: denText } })
+  }
+  // 根号优先；重叠命中（根号内部又套分数）丢弃分数那个
+  hits.sort((a, b) => a.start - b.start || (a.token.kind === 'sqrt' ? -1 : 1))
+  const kept: typeof hits = []
+  let lastEnd = -1
+  for (const hit of hits) {
+    if (hit.start < lastEnd) continue
+    kept.push(hit)
+    lastEnd = hit.end
+  }
+  let cursor = 0
+  for (const hit of kept) {
+    if (hit.start > cursor) tokens.push({ kind: 'text', text: input.slice(cursor, hit.start) })
+    tokens.push(hit.token)
+    cursor = hit.end
   }
   if (cursor < input.length) tokens.push({ kind: 'text', text: input.slice(cursor) })
   if (tokens.length === 0) tokens.push({ kind: 'text', text: input })
