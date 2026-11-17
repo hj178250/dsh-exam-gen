@@ -60,6 +60,41 @@ function drawRuns(doc, runs, x, y, size) {
 const A4 = { width: 595.28, height: 841.89 };
 const MARGIN = { top: 52, bottom: 58, left: 56, right: 56 };
 const CONTENT_WIDTH = A4.width - MARGIN.left - MARGIN.right;
+/**
+ * 卷面版式固定 spec（对标 GitHub 真卷模板固化，防止每次改版凭感觉调）：
+ *   - gaokao_exam（shaodongtang/gaokao_exam，LaTeX 91★）：A3 双栏横排 + 装订线是印刷格式，
+ *     其硬参数被吸收成 A4 单栏打印版式——绝密★启用前、黑体大题标题、解答题分值右对齐、页脚双计数。
+ *   - ezexam（gbchu/ezexam，Typst 47★）：选项 label-offset/悬挂缩进、fillin 空线 3em、
+ *     题号悬挂缩进（hanging-indent）、公式过高题号错位解法（题号固定 22pt 宽，正文独立流排）。
+ * 所有值一次性写死；改版式只动这里，不动下面任何绘制函数。
+ */
+const PAPER_LAYOUT = {
+    // 卷头
+    headerTitleSize: 19, // 主标题黑体 19pt（对标真卷 zihao{3}≈16pt 放大适配 A4 单栏）
+    headerInfoSize: 9.5, // 考试时间/满分行
+    headerLabelGap: '　　', // 卷面规格与考试信息之间的全角空隙
+    noticeBoxHeight: 62, // 注意事项框高度
+    noticeLineGap: 2.5,
+    // 绝密★启用前（gaokao_exam \juemi：黑体小四）
+    secretMark: '绝密★启用前',
+    secretMarkSize: 12,
+    // 大题标题（gaokao_exam ctexset：黑体五号≈10.5pt，我们放大到 12 保证层级感）
+    sectionTitleSize: 12,
+    // 题干
+    questionLabelWidth: 22, // 题号列宽（悬挂缩进：正文从 22pt 起，回行对齐）
+    optionLabelOffset: 15, // 选项字母列宽（对标 tasks label-offset 0.4em≈5pt 放大适配）
+    optionLabelGap: 26, // 选项槽位补偿（字母 15 + 间隙）
+    fillBlankWidth: 210, // 填空题作答横线长度（对标 ezexam fillin len 27.5pt 放大到适合 A4 单栏）
+    // 解答题：得分虚线 + 分值右对齐（gaokao_exam \defen dash pattern）
+    scoreDashPattern: [1, 2.5],
+    scoreDashGap: 4,
+    scoreLabelOffset: 34, // 分值文字与虚线末端的距离
+    // 页脚（gaokao_exam fancyfoot 双计数：第X页 / 共Y页）
+    footerSize: 8,
+    footerTitleWidthRatio: 0.5, // 卷名占左半，页码占右半
+    // 密封线
+    sealLineText: '———————————————————— 密 封 线 ————————————————————',
+};
 const BODY_SIZE = 10.5;
 const BODY_LINE = 17;
 const SMALL_SIZE = 9;
@@ -118,17 +153,21 @@ function estimateMinutes(paper) {
 }
 function drawHeader(doc, paper, totalPoints, minutes) {
     const centerX = A4.width / 2;
-    doc.font('hei').fontSize(19).fillColor('#111');
-    doc.text(paper.title, MARGIN.left, MARGIN.top, { width: CONTENT_WIDTH, align: 'center' });
+    // 绝密★启用前（真卷卷头第一行，gaokao_exam \juemi 黑体小四左对齐）
+    doc.font('hei').fontSize(PAPER_LAYOUT.secretMarkSize).fillColor('#111');
+    doc.text(PAPER_LAYOUT.secretMark, MARGIN.left, MARGIN.top - 4, { width: CONTENT_WIDTH, lineBreak: false });
+    doc.y = MARGIN.top + 12;
+    doc.font('hei').fontSize(PAPER_LAYOUT.headerTitleSize).fillColor('#111');
+    doc.text(paper.title, MARGIN.left, doc.y, { width: CONTENT_WIDTH, align: 'center' });
     doc.moveDown(0.35);
-    doc.font('song').fontSize(SMALL_SIZE + 0.5).fillColor('#333');
+    doc.font('song').fontSize(PAPER_LAYOUT.headerInfoSize).fillColor('#333');
     const difficulty = paper.meta?.difficulty ? `　　难度：${paper.meta.difficulty}` : '';
-    const label = paper.meta?.label ? `${paper.meta.label}　　` : '';
+    const label = paper.meta?.label ? `${paper.meta.label}${PAPER_LAYOUT.headerLabelGap}` : '';
     doc.text(`${label}考试时间：${minutes} 分钟　　满分：${totalPoints} 分${difficulty}`, { width: CONTENT_WIDTH, align: 'center' });
     doc.moveDown(0.7);
     // 注意事项框
     const boxTop = doc.y;
-    const boxHeight = 62;
+    const boxHeight = PAPER_LAYOUT.noticeBoxHeight;
     doc.save();
     doc.lineWidth(0.8).strokeColor('#999');
     doc.rect(MARGIN.left, boxTop, CONTENT_WIDTH, boxHeight).stroke();
@@ -140,7 +179,7 @@ function drawHeader(doc, paper, totalPoints, minutes) {
         '1．答题前请将姓名、班级、学号填写在密封线内。',
         '2．选择题、填空题答案写在答题处；解答题写出必要的文字说明、演算步骤。',
         '3．考试结束后，将本试卷和答题卡一并交回。',
-    ].join('\n'), MARGIN.left + 68, boxTop + 6, { width: CONTENT_WIDTH - 80, lineGap: 2.5 });
+    ].join('\n'), MARGIN.left + 68, boxTop + 6, { width: CONTENT_WIDTH - 80, lineGap: PAPER_LAYOUT.noticeLineGap });
     doc.y = boxTop + boxHeight + 10;
     // 考生信息栏 + 密封线
     const infoY = doc.y;
@@ -150,7 +189,7 @@ function drawHeader(doc, paper, totalPoints, minutes) {
     });
     doc.moveDown(0.6);
     doc.font('kai').fontSize(SMALL_SIZE).fillColor('#666');
-    doc.text('———————————————————— 密 封 线 ————————————————————', MARGIN.left, doc.y, {
+    doc.text(PAPER_LAYOUT.sealLineText, MARGIN.left, doc.y, {
         width: CONTENT_WIDTH,
         align: 'center',
     });
@@ -183,7 +222,7 @@ function drawQuestions(doc, paper) {
     }
 }
 function drawQuestion(doc, number, question, isLast, subject) {
-    const labelWidth = 22;
+    const labelWidth = PAPER_LAYOUT.questionLabelWidth;
     ensureSpace(doc, 46);
     const startY = doc.y;
     doc.font('song').fontSize(BODY_SIZE).fillColor('#111');
@@ -202,9 +241,22 @@ function drawQuestion(doc, number, question, isLast, subject) {
         cursorY = drawOptions(doc, options, cursorY, subject);
     }
     else if (normalizeType(question.type) === 'solve') {
+        // 得分虚线 + 分值右对齐（gaokao_exam \defen：dash on 1pt off 2.5pt + 「(X 分)」）
+        const dashEnd = MARGIN.left + CONTENT_WIDTH;
+        const scoreY = cursorY + PAPER_LAYOUT.scoreDashGap;
+        doc.save();
+        doc.lineWidth(0.7).strokeColor('#999');
+        doc.dash(PAPER_LAYOUT.scoreDashPattern);
+        doc.moveTo(MARGIN.left + labelWidth, scoreY);
+        doc.lineTo(dashEnd, scoreY);
+        doc.stroke();
+        doc.undash();
+        doc.restore();
+        doc.font('song').fontSize(SMALL_SIZE).fillColor('#888');
+        doc.text(`（${question.points || 15} 分）`, dashEnd + 2, scoreY - 6, { width: 60, lineBreak: false });
         // 解答题留作答空间（按分值给行数，卷面更像样）
         const lines = Math.max(4, Math.min(12, Math.round((question.points || 10) / 2.5)));
-        cursorY += lines * BODY_LINE * 0.9;
+        cursorY = scoreY + lines * BODY_LINE * 0.9;
     }
     else {
         // 填空题：题干本身不带空位时，在题干下方单独一行画作答横线（卷面常见做法）
@@ -215,7 +267,7 @@ function drawQuestion(doc, number, question, isLast, subject) {
             doc.text('答：', MARGIN.left + labelWidth, cursorY - 1, { width: 24, lineBreak: false });
             doc.lineWidth(0.7).strokeColor('#333');
             doc.moveTo(MARGIN.left + labelWidth + 26, lineY);
-            doc.lineTo(MARGIN.left + labelWidth + 210, lineY);
+            doc.lineTo(MARGIN.left + labelWidth + PAPER_LAYOUT.fillBlankWidth, lineY);
             doc.stroke();
             doc.restore();
             cursorY += 22;
@@ -243,7 +295,7 @@ function drawOptions(doc, options, top, subject) {
     // 列数按「最长选项的实际渲染宽度」算，能塞几列就塞几列（2~4），避免长选项被硬折行
     doc.font('song').fontSize(BODY_SIZE);
     const widest = Math.max(...options.map((option) => doc.widthOfString(normalizeText(option, subject))), 1);
-    const slot = widest + 26;
+    const slot = widest + PAPER_LAYOUT.optionLabelGap;
     const columns = Math.max(2, Math.min(4, Math.floor(usable / slot)));
     const columnWidth = usable / columns;
     const rowHeight = BODY_LINE + 2;
@@ -254,8 +306,8 @@ function drawOptions(doc, options, top, subject) {
             const letter = letters[i + j] ?? '?';
             const x = MARGIN.left + indent + j * columnWidth;
             doc.font('song').fontSize(BODY_SIZE).fillColor('#111');
-            doc.text(`${letter}.`, x, y, { width: 15, lineBreak: false });
-            flowMath(doc, normalizeText(option, subject), x + 15, y, columnWidth - 18, { size: BODY_SIZE }, subject);
+            doc.text(`${letter}.`, x, y, { width: PAPER_LAYOUT.optionLabelOffset, lineBreak: false });
+            flowMath(doc, normalizeText(option, subject), x + PAPER_LAYOUT.optionLabelOffset, y, columnWidth - 18, { size: BODY_SIZE }, subject);
         });
         y += rowHeight;
     }
@@ -462,10 +514,10 @@ function stampFooters(doc, title) {
         // 否则 pdfkit 判定「y 超出内容区」会自动 addPage，凭空多出空白页
         const savedBottom = doc.page.margins.bottom;
         doc.page.margins.bottom = 0;
-        doc.font('song').fontSize(8).fillColor('#666');
-        doc.text(title, MARGIN.left, y, { width: CONTENT_WIDTH / 2, align: 'left', lineBreak: false });
-        doc.text(`第 ${i + 1} 页 / 共 ${range.count} 页`, MARGIN.left + CONTENT_WIDTH / 2, y, {
-            width: CONTENT_WIDTH / 2,
+        doc.font('song').fontSize(PAPER_LAYOUT.footerSize).fillColor('#666');
+        doc.text(title, MARGIN.left, y, { width: CONTENT_WIDTH * PAPER_LAYOUT.footerTitleWidthRatio, align: 'left', lineBreak: false });
+        doc.text(`第 ${i + 1} 页 / 共 ${range.count} 页`, MARGIN.left + CONTENT_WIDTH * PAPER_LAYOUT.footerTitleWidthRatio, y, {
+            width: CONTENT_WIDTH * (1 - PAPER_LAYOUT.footerTitleWidthRatio),
             align: 'right',
             lineBreak: false,
         });
